@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Test suite for [AURA]. Compiles the exact same Aura/*.cs files that
+       GrowTool77 uses and runs them against fake game/server endpoints. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>AuraTests</RootNamespace>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <UseAppHost>false</UseAppHost>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="../GrowTool77/Aura/*.cs" Link="Aura/%(Filename)%(Extension)" />
+    <None Include="../GrowTool77/Native/libaura_enet.so" Link="libaura_enet.so" CopyToOutputDirectory="PreserveNewest" Condition="Exists('../GrowTool77/Native/libaura_enet.so')" />
+    <None Include="../GrowTool77/Native/aura_enet.dll" Link="aura_enet.dll" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>

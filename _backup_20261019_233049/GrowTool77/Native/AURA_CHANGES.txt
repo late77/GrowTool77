@@ -1,0 +1,34 @@
+[AURA] native bridge — what is in this folder
+=============================================
+
+enet/          ENet 1.3 with Growtopia's protocol changes, from
+               https://github.com/ZTzTopia/enet (MIT licence, see enet/LICENSE),
+               commit listed in enet/FORK_COMMIT.txt.
+aura_enet.c    Small flat C API used by GrowTool77 (Aura/AuraNative.cs).
+aura_enet.dll  Windows x64 build of the two above (sh build.sh win).
+build.sh       Rebuilds the DLL with MinGW, or a Linux .so for the test suite.
+
+The DLL imports only: WS2_32 (sockets), WINMM (timers), KERNEL32 (locks,
+sleep, memory) and msvcrt (memory/strings). No file, registry, process,
+keyboard or HTTP functions.
+
+Changes made to the fork (enet/protocol.c, enet/include/enet/enet.h)
+--------------------------------------------------------------------
+1. Sender: the 6-byte "integrity" header that Growtopia's server expects is
+   now generated for every datagram, from the port of the peer the datagram
+   is sent to. The fork generated it once per send call from peers[0]:
+     - fragments of one large packet shared the same nonce, so the receiver
+       dropped all but the first (packets over ~1.4 KB stalled), and
+     - with more than one peer slot, a reconnect could use the wrong port.
+   A new field ENetPeer.sentNonce makes sure two datagrams in a row never
+   carry the same nonce.
+
+2. Receiver (only the side that faces the game, bound to 127.0.0.1): a
+   datagram whose nonce equals the previous one is no longer dropped.
+
+Both were found by the test suite (AuraTests) and verified on Linux and,
+for the Windows DLL, under Wine: packets of 100 B – 130 KB in both
+directions.
+
+SHA-256 of aura_enet.dll in this package:
+  bbc14ce21521d92349992bbc1436a917b9cce24a5ddab56c84fa058c1929991b

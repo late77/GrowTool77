@@ -1,0 +1,66 @@
+[AURA] native bridge — what is in this folder
+=============================================
+
+enet/          ENet 1.3 with Growtopia's protocol changes, from
+               https://github.com/ZTzTopia/enet (MIT licence, see enet/LICENSE),
+               commit listed in enet/FORK_COMMIT.txt.
+aura_enet.c    Small flat C API used by GrowTool77 (Aura/AuraNative.cs).
+aura_enet.dll  Windows x64 build of the two above (sh build.sh win).
+build.sh       Rebuilds the DLL with MinGW, or a Linux .so for the test suite.
+
+The DLL imports only: WS2_32 (sockets), WINMM (timers), KERNEL32 (locks,
+sleep, memory) and msvcrt (memory/strings). No file, registry, process,
+keyboard or HTTP functions.
+
+Changes made to the fork (enet/protocol.c, enet/include/enet/enet.h)
+--------------------------------------------------------------------
+1. Sender: the 6-byte "integrity" header that Growtopia's server expects is
+   now generated for every datagram, from the port of the peer the datagram
+   is sent to. The fork generated it once per send call from peers[0]:
+     - fragments of one large packet shared the same nonce, so the receiver
+       dropped all but the first (packets over ~1.4 KB stalled), and
+     - with more than one peer slot, a reconnect could use the wrong port.
+   A new field ENetPeer.sentNonce makes sure two datagrams in a row never
+   carry the same nonce.
+
+2. Receiver (only the side that faces the game, bound to 127.0.0.1): a
+   datagram whose nonce equals the previous one is no longer dropped.
+
+Both were found by the test suite (AuraTests) and verified on Linux and,
+for the Windows DLL, under Wine: packets of 100 B – 130 KB in both
+directions.
+
+
+[AURA] TLS front door (aura_tls.c) — added in v0.8
+--------------------------------------------------
+A small OpenSSL-based HTTPS server. Growtopia's client is OpenSSL and rejects
+the handshake offered by Windows' TLS stack, which made the login step fail
+("Check your internet / VPN"). This server uses the same options as the working
+GTProxy (cpp-httplib): TLS 1.2 minimum, SSL_OP_NO_COMPRESSION. It serves only
+127.0.0.1 and hands each request up to C# (LoginRelay) for the actual
+forwarding and rewriting. OpenSSL 3.0.15 (LTS) is linked statically into
+aura_enet.dll; build with OPENSSL_DIR pointing at its source tree
+(see build.sh). No files, processes or extra network connections are opened by
+this code.
+
+v0.9: the key and self-signed certificate are generated inside OpenSSL
+(aura_tls_create_selfsigned). Windows' key store is no longer used at all
+(v0.8 failed on Windows with "The requested operation is not supported"
+when exporting the key from it). On Windows the port is opened with
+SO_EXCLUSIVEADDRUSE so a port already used by another program is reported.
+
+v1.0: the hosts redirect now covers growtopia1.com / growtopia2.com WITHOUT
+"www" as well, not only the www forms. The game's login step uses the non-www
+name, so redirecting only www let the game reach the real server directly and
+bypass [AURA] (the log then showed no "Login step" lines at all). The TLS
+front door also handles each connection on its own thread with a 20-second
+per-socket timeout, so one slow login attempt can't block the next.
+
+v1.1: no native change. aura_enet.dll is identical to v1.0; the fix is in C# (DNS-over-HTTPS).
+
+v1.4: the TLS front door reports connection-level events (TCP accepted, handshake ok/failed) so the log shows whether the game reaches port 443 and whether it accepts [AURA]'s certificate — the step before any HTTP request.
+
+v1.5: the login certificate is now a CA (basicConstraints CA:TRUE) and is exported as PEM (aura_tls_get_cert_pem). C# installs it into the user's Trusted Root store while [AURA] runs, so Growtopia stops rejecting it with 'unknown ca', and removes it on stop. Proven with OpenSSL verification on: trusted = handshake ok, untrusted = the exact 'self-signed/unknown ca' failure the game showed.
+
+SHA-256 of aura_enet.dll in this package:
+  644382df8dc0898afc79913a9d671dc8aea67f939f94ecd0a7268b5858757fb6
