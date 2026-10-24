@@ -21,6 +21,8 @@ public class AutoTab : Panel
 
     // ── Auto Buy controls ─────────────────────────────────────────────
     private readonly Panel          _buyPanel;
+    private readonly ItemListView   _buyList;
+    private readonly TextBox        _buyFilter;
     private readonly Label          _buyItemLbl;
     private readonly Label          _buyPriceLbl;
     private readonly TextBox        _buyQtyBox;
@@ -28,6 +30,8 @@ public class AutoTab : Panel
     private readonly Dot            _buyDot;
     private readonly Label          _buyStatusLbl;
     private          AutoBuyFeature? _autoBuy;
+    private          ShopItem?       _selectedBuyItem;
+    private          IReadOnlyList<ShopItem> _allShopItems = Array.Empty<ShopItem>();
 
     // ── Providers controls ────────────────────────────────────────────
     private readonly Panel           _providersPanel;
@@ -199,45 +203,52 @@ public class AutoTab : Panel
         _surgPanel.Controls.Add(surgHint);
         Controls.Add(_surgPanel);
 
-        // ── Auto Buy panel ────────────────────────────────────────────
-        _buyPanel = new Panel { Bounds = Theme.R(24, 100, 832, 260), BackColor = Theme.Bg, Visible = false };
+        // ── Auto Buy panel — Shop Browser ─────────────────────────────
+        _buyPanel = new Panel { Bounds = Theme.R(24, 100, 832, 318), BackColor = Theme.Bg, Visible = false };
 
-        var buyCard = new Card { Bounds = Theme.R(0, 0, 832, 190) };
-        buyCard.Controls.Add(Ui.Lbl("Auto Buy from Vending Machine", Theme.R(20, 12, 500, 22), Theme.BodyBold, Theme.Gold));
-        buyCard.Controls.Add(Ui.Lbl("Wrench any vending machine to detect the item for sale.", Theme.R(20, 36, 792, 20), Theme.Small, Theme.TextDim));
+        // List card: all gem-purchasable shop items
+        var listCard = new Card { Bounds = Theme.R(0, 0, 832, 194) };
+        listCard.Controls.Add(Ui.Lbl("Shop Browser", Theme.R(20, 8, 300, 20), Theme.BodyBold, Theme.Gold));
+        listCard.Controls.Add(Ui.Lbl("Open Shop in Growtopia — list refreshes automatically as you browse tabs.", Theme.R(20, 28, 600, 18), Theme.Small, Theme.TextDim));
 
-        buyCard.Controls.Add(Ui.Divider(Theme.R(20, 58, 792, 1)));
+        _buyFilter = new TextBox { Bounds = Theme.R(20, 50, 220, 26), Font = Theme.Body, BackColor = Theme.Input, ForeColor = Theme.Text, BorderStyle = BorderStyle.FixedSingle };
+        _buyFilter.PlaceholderText = "Search items…";
+        _buyFilter.TextChanged += (_, _) => RefreshBuyList();
+        listCard.Controls.Add(_buyFilter);
 
-        _buyItemLbl  = Ui.Lbl("No vend detected — wrench a vending machine", Theme.R(20, 66, 500, 24), Theme.Body, Theme.Text);
-        _buyPriceLbl = Ui.Lbl("", Theme.R(20, 92, 500, 22), Theme.Small, Theme.TextDim);
-        buyCard.Controls.Add(_buyItemLbl);
-        buyCard.Controls.Add(_buyPriceLbl);
+        _buyList = new ItemListView { Bounds = Theme.R(20, 82, 792, 96) };
+        _buyList.Columns.Add("Item Name", Theme.S(400));
+        _buyList.Columns.Add("Price (gems)", Theme.S(120));
+        _buyList.Columns.Add("Code", Theme.S(160));
+        _buyList.MultiSelect  = false;
+        _buyList.FullRowSelect = true;
+        _buyList.Click += (_, _) => OnBuyListClick();
+        listCard.Controls.Add(_buyList);
+        _buyPanel.Controls.Add(listCard);
 
-        buyCard.Controls.Add(Ui.Lbl("Quantity:", Theme.R(20, 122, 80, 26), Theme.Body, Theme.TextDim));
-        _buyQtyBox = new TextBox { Bounds = Theme.R(106, 120, 100, 26), Font = Theme.Body, BackColor = Theme.Input, ForeColor = Theme.Text, BorderStyle = BorderStyle.FixedSingle, Text = "200" };
-        var buyMaxBtn = new GtButton("Max", ButtonKind.Secondary) { Bounds = Theme.R(212, 120, 60, 26) };
+        // Control card: selected item + qty + start
+        var ctrlCard = new Card { Bounds = Theme.R(0, 200, 832, 114) };
+        _buyItemLbl  = Ui.Lbl("Open Shop in Growtopia — browse to any tab to load items", Theme.R(20, 10, 700, 22), Theme.Body, Theme.Text);
+        _buyPriceLbl = Ui.Lbl("", Theme.R(20, 32, 500, 18), Theme.Small, Theme.TextDim);
+        ctrlCard.Controls.AddRange(new Control[] { _buyItemLbl, _buyPriceLbl });
+
+        ctrlCard.Controls.Add(Ui.Divider(Theme.R(20, 56, 792, 1)));
+        ctrlCard.Controls.Add(Ui.Lbl("Quantity:", Theme.R(20, 66, 70, 26), Theme.Body, Theme.TextDim));
+        _buyQtyBox = new TextBox { Bounds = Theme.R(96, 64, 90, 26), Font = Theme.Body, BackColor = Theme.Input, ForeColor = Theme.Text, BorderStyle = BorderStyle.FixedSingle, Text = "200" };
+        var buyMaxBtn = new GtButton("Max affordable", ButtonKind.Secondary) { Bounds = Theme.R(194, 64, 130, 26) };
         buyMaxBtn.Click += (_, _) =>
         {
-            // Max = floor(gems / price) — gems not tracked yet → just leave as user input
-            _buyQtyBox.Text = "10000";
+            if (_autoBuy == null || _selectedBuyItem == null) return;
+            long gems = _autoBuy.GemsLeft;
+            if (gems <= 0) { _buyQtyBox.Text = "10000"; return; }
+            _buyQtyBox.Text = Math.Max(1, gems / _selectedBuyItem.Price).ToString();
         };
-        buyCard.Controls.AddRange(new Control[] { _buyItemLbl, _buyPriceLbl, _buyQtyBox, buyMaxBtn });
-
-        buyCard.Controls.Add(Ui.Divider(Theme.R(20, 152, 792, 1)));
-
-        _buyBtn       = new GtButton("Start") { Bounds = Theme.R(20, 160, 120, 26) };
-        _buyDot       = new Dot  { Bounds = Theme.R(152, 168, 14, 14) };
-        _buyStatusLbl = Ui.Lbl("Wrench a vend to begin", Theme.R(174, 160, 500, 26), Theme.Body, Theme.TextDim);
+        _buyBtn       = new GtButton("Start") { Bounds = Theme.R(340, 64, 100, 26) };
+        _buyDot       = new Dot  { Bounds = Theme.R(452, 72, 14, 14) };
+        _buyStatusLbl = Ui.Lbl("Browse Shop to load items", Theme.R(474, 64, 340, 26), Theme.Body, Theme.TextDim);
         _buyBtn.Click += (_, _) => ToggleAutoBuy();
-        buyCard.Controls.AddRange(new Control[] { _buyBtn, _buyDot, _buyStatusLbl });
-        _buyPanel.Controls.Add(buyCard);
-
-        var buyHint = new Card { Bounds = Theme.R(0, 198, 832, 58) };
-        buyHint.Controls.Add(Ui.Lbl(
-            "Wrench vend → item appears above → set quantity → Start.\n" +
-            "When inventory fills, proxy auto-drops stack and continues. Stops at target count.",
-            Theme.R(20, 6, 792, 46), Theme.Small, Theme.TextDim, ContentAlignment.TopLeft));
-        _buyPanel.Controls.Add(buyHint);
+        ctrlCard.Controls.AddRange(new Control[] { _buyQtyBox, buyMaxBtn, _buyBtn, _buyDot, _buyStatusLbl });
+        _buyPanel.Controls.Add(ctrlCard);
         Controls.Add(_buyPanel);
 
         // ── Providers panel ──────────────────────────────────────────
@@ -379,17 +390,53 @@ public class AutoTab : Panel
     public void SetAutoBuyFeature(AutoBuyFeature f)
     {
         _autoBuy = f;
-        _autoBuy.ShopItemDetected += (code, name, id) => OnUi(() =>
+        _autoBuy.ShopItemsUpdated += items => OnUi(() =>
         {
-            _buyItemLbl.Text  = $"Item: {name}  (code: {code})";
-            _buyPriceLbl.Text = "Open the Shop, navigate to the item, click it — then Start here.";
-            _selector.SelectedIndex = 4;
+            _allShopItems = items;
+            RefreshBuyList();
+            _selector.SelectedIndex = 4; // switch to Auto Buy tab
         });
         _autoBuy.StatusChanged += s => OnUi(() =>
         {
             _buyDot.DotColor = _autoBuy.IsRunning ? Theme.Good : Theme.Bad;
             _buyStatusLbl.Text = s;
         });
+    }
+
+    private void RefreshBuyList()
+    {
+        if (IsDisposed) return;
+        string filter = _buyFilter?.Text ?? "";
+        _buyList.BeginUpdate();
+        _buyList.Items.Clear();
+        foreach (var item in _allShopItems)
+        {
+            if (!string.IsNullOrEmpty(filter) &&
+                !item.Name.Contains(filter, StringComparison.OrdinalIgnoreCase) &&
+                !item.Code.Contains(filter, StringComparison.OrdinalIgnoreCase)) continue;
+            var row = new ListViewItem(item.Name) { Tag = item, ForeColor = Theme.Text };
+            row.SubItems.Add($"{item.Price:N0}");
+            row.SubItems.Add(item.Code);
+            _buyList.Items.Add(row);
+        }
+        _buyList.EndUpdate();
+        if (_allShopItems.Count > 0 && _buyList.Items.Count == 0)
+            _buyStatusLbl.Text = "No items match filter";
+        else if (_allShopItems.Count == 0)
+            _buyStatusLbl.Text = "Browse Shop in Growtopia to load items";
+    }
+
+    private void OnBuyListClick()
+    {
+        if (_autoBuy == null) return;
+        var sel = _buyList.SelectedItems.Count > 0 ? _buyList.SelectedItems[0] : null;
+        if (sel?.Tag is not ShopItem item) return;
+        _selectedBuyItem   = item;
+        _buyItemLbl.Text   = $"{item.Name}";
+        _buyPriceLbl.Text  = $"{item.Price:N0} gems each — code: {item.Code}";
+        _buyDot.DotColor   = Theme.Warn;
+        _buyStatusLbl.Text = "Ready — set quantity and click Start";
+        _autoBuy.SelectItem(item);
     }
 
     private void ToggleAutoBuy()

@@ -80,14 +80,14 @@ public sealed class AuraProxy : IDisposable
         set { _verboseLog = value; _log.Info($"[VERBOSE] Packet logging {(value ? "ON" : "OFF")} — all packets will appear in [AURA] log."); }
     }
 
-    private FarmFeature?      _farmFeature;
-    private ProvidersFeature? _providersFeature;
-    private AutoBuyFeature?   _autoBuyFeature;
+    private FarmFeature?          _farmFeature;
+    private ProvidersFeature?     _providersFeature;
+    private volatile AutoBuyFeature? _autoBuyFeature;
     private ProxyCommands?    _proxyCommands;
 
     public void SetFarmFeature(FarmFeature? f)           => _inbox.Enqueue(() => _farmFeature      = f);
     public void SetProvidersFeature(ProvidersFeature? p) => _inbox.Enqueue(() => _providersFeature = p);
-    public void SetAutoBuyFeature(AutoBuyFeature? b)     => _inbox.Enqueue(() => _autoBuyFeature   = b);
+    public void SetAutoBuyFeature(AutoBuyFeature? b) { _autoBuyFeature = b; _inbox.Enqueue(() => _autoBuyFeature = b); }
     public void SetProxyCommands(ProxyCommands? c)       => _inbox.Enqueue(() => _proxyCommands    = c);
     public bool DebugDrops { get => _debugDrops; set => _debugDrops = value; }
 
@@ -447,8 +447,14 @@ public sealed class AuraProxy : IDisposable
             _log.Info($"[PKT→SRV] Text: {text.Replace('\n','|').Substring(0, Math.Min(300, text.Length))}");
 
         // Auto Buy: intercept shop buy clicks
-        if (_autoBuyFeature != null && text.StartsWith("action|buy|item|", StringComparison.Ordinal))
-            _autoBuyFeature.OnGameBuyAction(text);
+        // Use IndexOf instead of StartsWith — handles any invisible leading bytes in the packet
+        int buyIdx = text.IndexOf("action|buy|item|", StringComparison.Ordinal);
+        if (buyIdx >= 0 && buyIdx < 8)
+        {
+            string buyText = text.Substring(buyIdx);
+            _log.Info($"[AutoBuy] Buy packet (idx={buyIdx}): {buyText.Replace('\n','|').Substring(0, Math.Min(80, buyText.Length))}");
+            _autoBuyFeature?.OnGameBuyAction(buyText);
+        }
 
         // Both features see all game→server text.
         _fishFeature?.OnGameText(text);
@@ -504,8 +510,6 @@ public sealed class AuraProxy : IDisposable
     private void HandleConsoleMessage(VariantList vl)
     {
         if (vl.Items.Count < 2 || vl.Items[1].S is not string raw) return;
-        // Forward to AutoBuy for inventory-full detection
-        _autoBuyFeature?.OnServerMessage(raw);
         if (_world.CurrentWorld == null) return;
         var text = StripColors(raw);
         if (!text.StartsWith("Collected ", StringComparison.Ordinal)) return;
@@ -546,8 +550,12 @@ public sealed class AuraProxy : IDisposable
 
         if (!GameUpdate.TryRead(data, out var gu)) return data;
 
-        if (_verboseLog && gu.Type != 0) // skip position spam
+        if (_verboseLog && gu.Type != 0)
             _log.Info($"[SRV→PKT] GamePkt type={gu.Type} netId={gu.NetId} intData={gu.IntData} flags={gu.Flags}");
+
+        // type=13: item added to inventory after purchase — track for auto-drop
+        if (gu.Type == 13 && _autoBuyFeature != null && gu.IntData > 0)
+            _autoBuyFeature.OnItemReceived(gu.IntData);
 
         switch (gu.Type)
         {
@@ -592,10 +600,23 @@ public sealed class AuraProxy : IDisposable
                             }
                         }
 
+                        // Shop Browser: parse item listings from OnStoreRequest
+                        if (vl.Function == "OnStoreRequest"
+                            && vl.Items.Count > 1 && vl.Items[1].Type == VariantList.TString)
+                        {
+                            _autoBuyFeature?.OnStoreRequest(vl.Items[1].S);
+                        }
+
                         // Auto Buy: shop purchase confirmation
                         if (vl.Function == "OnStorePurchaseResult" && _autoBuyFeature != null
                             && vl.Items.Count > 1 && vl.Items[1].Type == VariantList.TString)
                             _autoBuyFeature.OnStorePurchaseResult(vl.Items[1].S);
+
+                        // Auto Buy: drop dialog (server asks how many to drop)
+                        if (vl.Function == "OnDialogRequest" && _autoBuyFeature != null
+                            && vl.Items.Count > 1 && vl.Items[1].Type == VariantList.TString
+                            && vl.Items[1].S.Contains("end_dialog|drop_item", StringComparison.Ordinal))
+                            _autoBuyFeature.OnDropDialog(vl.Items[1].S);
 
 
                         // QoL: auto-dismiss the Gazette (login news dialog)

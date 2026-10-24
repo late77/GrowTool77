@@ -289,8 +289,6 @@ public class MainForm : Form
         // ── Auto Buy feature wiring ─────────────────────────────────
         var autoBuyFeature = new AutoBuyFeature(
             _aura.Proxy.EnqueueToServer,
-            () => _aura.Proxy.TryGetPlayer(out var bx, out var by) ? (true, bx, by) : (false, 0f, 0f),
-            _aura.EnsureItems(_main.GamePath),
             _aura.Log);
         _aura.Proxy.SetAutoBuyFeature(autoBuyFeature);
         _autoTab.SetAutoBuyFeature(autoBuyFeature);
@@ -316,7 +314,7 @@ public class MainForm : Form
         {
             _farmFeature?.Tick();
             providersFeature.Tick();
-            autoBuyFeature.Tick();
+            // autoBuyFeature has no Tick - runs event-driven via OnStorePurchaseResult
 
             // F key toggle — only when Growtopia has focus, no global steal
             if (GrowtopiaHasFocus())
