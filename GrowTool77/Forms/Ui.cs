@@ -1,3 +1,5 @@
+// lang: C#, file: Ui.cs, target: .NET 8 Windows WinForms, proj: GrowTool77
+// UI components — v2: gradient cards, modern buttons, better tabs, depth.
 using System.Drawing.Drawing2D;
 using GrowTool77.Modules;
 
@@ -27,7 +29,7 @@ public static class Ui
     }
 }
 
-// Rounded card with a light rim, like the in-game pack banners.
+// Rounded card with top-to-bottom gradient and vivid rim — gives depth without clutter.
 public class Card : Panel
 {
     public Card()
@@ -39,14 +41,29 @@ public class Card : Panel
 
     protected override void OnPaintBackground(PaintEventArgs e)
     {
-        var g = e.Graphics;
+        var g   = e.Graphics;
         g.Clear(Parent?.BackColor ?? Theme.Bg);
         g.SmoothingMode = SmoothingMode.AntiAlias;
+
         int rim = Math.Max(1, Theme.S(2));
-        var r = new Rectangle(rim / 2, rim / 2, Width - rim - 1, Height - rim - 1);
+        var r   = new Rectangle(rim / 2, rim / 2, Width - rim - 1, Height - rim - 1);
+
         using var path = Theme.Round(r, Theme.S(14));
-        using (var fill = new SolidBrush(Theme.Card)) g.FillPath(fill, path);
-        using (var pen = new Pen(Theme.CardRim, rim)) g.DrawPath(pen, path);
+
+        // Subtle top→bottom gradient for depth
+        using (var grad = new LinearGradientBrush(
+                   new Point(0, 0), new Point(0, Math.Max(1, Height)),
+                   Theme.CardTop, Theme.Card))
+            g.FillPath(grad, path);
+
+        // Soft inner top-highlight (simulates light hitting the card)
+        using (var highlight = new Pen(Color.FromArgb(45, Color.White), 1))
+            g.DrawPath(highlight, Theme.Round(
+                new Rectangle(r.X + 1, r.Y + 1, r.Width - 2, r.Height / 2), Theme.S(13)));
+
+        // Vivid rim
+        using (var pen = new Pen(Theme.CardRim, rim))
+            g.DrawPath(pen, path);
     }
 }
 
@@ -69,12 +86,12 @@ public class GtButton : Control
         Cursor    = Cursors.Hand;
     }
 
-    protected override void OnMouseEnter(EventArgs e) { _hover = true; Invalidate(); base.OnMouseEnter(e); }
+    protected override void OnMouseEnter(EventArgs e) { _hover = true;  Invalidate(); base.OnMouseEnter(e); }
     protected override void OnMouseLeave(EventArgs e) { _hover = false; _down = false; Invalidate(); base.OnMouseLeave(e); }
-    protected override void OnMouseDown(MouseEventArgs e) { if (e.Button == MouseButtons.Left) { _down = true; Invalidate(); } base.OnMouseDown(e); }
-    protected override void OnMouseUp(MouseEventArgs e) { _down = false; Invalidate(); base.OnMouseUp(e); }
+    protected override void OnMouseDown(MouseEventArgs e) { if (e.Button == MouseButtons.Left) { _down = true;  Invalidate(); } base.OnMouseDown(e); }
+    protected override void OnMouseUp  (MouseEventArgs e) { _down = false; Invalidate(); base.OnMouseUp(e); }
     protected override void OnEnabledChanged(EventArgs e) { Cursor = Enabled ? Cursors.Hand : Cursors.Default; Invalidate(); base.OnEnabledChanged(e); }
-    protected override void OnTextChanged(EventArgs e) { Invalidate(); base.OnTextChanged(e); }
+    protected override void OnTextChanged  (EventArgs e) { Invalidate(); base.OnTextChanged(e); }
 
     private (Color fill, Color rim, Color fg) Colors()
     {
@@ -82,7 +99,7 @@ public class GtButton : Control
         return Kind switch
         {
             ButtonKind.Primary => (_down ? Theme.GoldPress : _hover ? Theme.GoldHover : Theme.Gold, Theme.GoldRim, Theme.OnGold),
-            ButtonKind.Danger  => (_hover ? Theme.DangerHover : Theme.Danger, Color.FromArgb(140, 40, 35), Theme.Text),
+            ButtonKind.Danger  => (_hover ? Theme.DangerHover : Theme.Danger, Color.FromArgb(135, 38, 30), Theme.Text),
             _                  => (_hover ? Theme.SecondaryHover : Theme.Secondary, Theme.CardRim, Theme.Text),
         };
     }
@@ -92,10 +109,32 @@ public class GtButton : Control
         var g = e.Graphics;
         g.SmoothingMode = SmoothingMode.AntiAlias;
         var (fill, rim, fg) = Colors();
-        using var path = Theme.Round(new Rectangle(0, 0, Width - 1, Height - 1), Theme.S(10));
-        using (var b = new SolidBrush(fill)) g.FillPath(b, path);
+        int radius = Theme.S(10);
+        using var path = Theme.Round(new Rectangle(0, 0, Width - 1, Height - 1), radius);
+
+        // Gradient fill for primary buttons
+        if (Kind == ButtonKind.Primary && Enabled)
+        {
+            var top = _down ? fill : Color.FromArgb(
+                Math.Min(255, fill.R + 22),
+                Math.Min(255, fill.G + 22),
+                Math.Min(255, fill.B + 12));
+            using var grad = new LinearGradientBrush(
+                new Point(0, 0), new Point(0, Math.Max(1, Height)),
+                top, fill);
+            g.FillPath(grad, path);
+        }
+        else
+        {
+            using var b = new SolidBrush(fill);
+            g.FillPath(b, path);
+        }
+
         using (var p = new Pen(rim, Math.Max(1, Theme.S(1)))) g.DrawPath(p, path);
-        var rect = _down && Enabled ? new Rectangle(0, Theme.S(1), Width, Height) : ClientRectangle;
+
+        var rect = _down && Enabled
+            ? new Rectangle(0, Theme.S(1), Width, Height)
+            : ClientRectangle;
         TextRenderer.DrawText(g, Text, Font, rect, fg,
             TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter |
             TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis);
@@ -104,7 +143,8 @@ public class GtButton : Control
 
 public class TabButton : Control
 {
-    private bool _hover, _selected;
+    private bool _hover;
+    private bool _selected;
 
     public bool Selected
     {
@@ -123,19 +163,31 @@ public class TabButton : Control
         Cursor    = Cursors.Hand;
     }
 
-    protected override void OnMouseEnter(EventArgs e) { _hover = true; Invalidate(); base.OnMouseEnter(e); }
+    protected override void OnMouseEnter(EventArgs e) { _hover = true;  Invalidate(); base.OnMouseEnter(e); }
     protected override void OnMouseLeave(EventArgs e) { _hover = false; Invalidate(); base.OnMouseLeave(e); }
 
     protected override void OnPaint(PaintEventArgs e)
     {
         var g = e.Graphics;
         g.SmoothingMode = SmoothingMode.AntiAlias;
+
         if (_selected)
         {
+            // Selected: filled with content-area colour + gold bottom accent
             using var path = Theme.RoundTop(new Rectangle(0, 0, Width - 1, Height), Theme.S(10));
-            using var b = new SolidBrush(Theme.Bg);
+            using (var b = new SolidBrush(Theme.Bg)) g.FillPath(b, path);
+            // Gold accent line at very bottom ties selected tab to content
+            using (var goldPen = new Pen(Theme.Gold, Theme.S(2)))
+                g.DrawLine(goldPen, Theme.S(4), Height - 1, Width - Theme.S(4), Height - 1);
+        }
+        else if (_hover)
+        {
+            // Hover: subtle white overlay
+            using var path = Theme.RoundTop(new Rectangle(1, 2, Width - 2, Height - 2), Theme.S(8));
+            using var b = new SolidBrush(Color.FromArgb(28, Color.White));
             g.FillPath(b, path);
         }
+
         var fg = _selected ? Theme.Gold : _hover ? Theme.Text : Theme.TextDim;
         TextRenderer.DrawText(g, Text, Font, ClientRectangle, fg,
             TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine);
@@ -161,9 +213,13 @@ public class Dot : Control
 
     protected override void OnPaint(PaintEventArgs e)
     {
-        e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-        using var b = new SolidBrush(_color);
-        e.Graphics.FillEllipse(b, 0, 0, Width - 1, Height - 1);
+        var g = e.Graphics;
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        // Glow ring
+        using (var glow = new SolidBrush(Color.FromArgb(40, _color)))
+            g.FillEllipse(glow, -1, -1, Width + 1, Height + 1);
+        using (var b = new SolidBrush(_color))
+            g.FillEllipse(b, 1, 1, Width - 3, Height - 3);
     }
 }
 
@@ -192,24 +248,37 @@ public class StatusPill : Control
     {
         var g = e.Graphics;
         g.SmoothingMode = SmoothingMode.AntiAlias;
-        using (var path = Theme.Round(new Rectangle(0, 0, Width - 1, Height - 1), Height / 2))
-        using (var b = new SolidBrush(Theme.HeaderDeep))
-            g.FillPath(b, path);
 
-        int d = Theme.S(10);
-        using (var dot = new SolidBrush(_on ? Theme.Good : Theme.Bad))
-            g.FillEllipse(dot, Theme.S(14), (Height - d) / 2, d, d);
+        // Deep background with subtle rim
+        using var path = Theme.Round(new Rectangle(0, 0, Width - 1, Height - 1), Height / 2);
+        using (var grad = new LinearGradientBrush(
+                   new Point(0, 0), new Point(0, Height),
+                   Color.FromArgb(20, 65, 22), Theme.HeaderDeep))
+            g.FillPath(grad, path);
+        using (var rim = new Pen(Color.FromArgb(60, Theme.CardRim), 1))
+            g.DrawPath(rim, path);
 
-        var textRect = new Rectangle(Theme.S(32), 0, Width - Theme.S(44), Height);
+        // Status dot with glow
+        int d  = Theme.S(10);
+        int dy = (Height - d) / 2;
+        var dc = _on ? Theme.Good : Theme.Bad;
+        using (var glow = new SolidBrush(Color.FromArgb(50, dc)))
+            g.FillEllipse(glow, Theme.S(12), dy - 1, d + 2, d + 2);
+        using (var dot = new SolidBrush(dc))
+            g.FillEllipse(dot, Theme.S(13), dy, d, d);
+
+        var textRect = new Rectangle(Theme.S(30), 0, Width - Theme.S(40), Height);
         TextRenderer.DrawText(g, Text, Font, textRect, Theme.Text,
-            TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis);
+            TextFormatFlags.Left | TextFormatFlags.VerticalCenter |
+            TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis);
     }
 }
 
-// Text input with rounded border; the real TextBox sits inside without its own border.
+// Text input with rounded border and glow on focus.
 public class InputBox : Panel
 {
     public TextBox Box { get; }
+    private bool _focused;
 
     public InputBox()
     {
@@ -223,6 +292,8 @@ public class InputBox : Panel
             ForeColor   = Theme.Text,
             Font        = Theme.Body,
         };
+        Box.Enter  += (_, _) => { _focused = true;  Invalidate(); };
+        Box.Leave  += (_, _) => { _focused = false; Invalidate(); };
         Controls.Add(Box);
         Cursor = Cursors.IBeam;
     }
@@ -244,6 +315,9 @@ public class InputBox : Panel
         g.SmoothingMode = SmoothingMode.AntiAlias;
         using var path = Theme.Round(new Rectangle(0, 0, Width - 1, Height - 1), Theme.S(8));
         using (var b = new SolidBrush(Theme.Input)) g.FillPath(b, path);
-        using (var p = new Pen(Theme.InputRim, Math.Max(1, Theme.S(1)))) g.DrawPath(p, path);
+        // Brighter rim when focused
+        var rimColor = _focused ? Theme.Gold : Theme.InputRim;
+        using (var p = new Pen(rimColor, _focused ? Math.Max(1, Theme.S(2)) : Math.Max(1, Theme.S(1))))
+            g.DrawPath(p, path);
     }
 }

@@ -44,7 +44,8 @@ public sealed class AuraProxy : IDisposable
     private readonly Stopwatch _sincePublish = Stopwatch.StartNew();
 
     // Fish feature — set and read on the network thread via _inbox.
-    private FishingFeature? _fishFeature;
+    private FishingFeature?    _fishFeature;
+    private SurgeryFeature?    _surgFeature;
 
     public ushort Port      { get; private set; }
     public bool   IsRunning => _running;
@@ -56,6 +57,10 @@ public sealed class AuraProxy : IDisposable
 
     private volatile float _playerX, _playerY;
     private volatile bool  _hasPlayer;
+    private volatile string? _localPlayerName;
+
+    public string?  LocalPlayerName => _localPlayerName;
+    public event Action<string>? PlayerNameChanged;
 
     public bool TryGetPlayer(out float x, out float y)
     {
@@ -65,6 +70,25 @@ public sealed class AuraProxy : IDisposable
     }
 
     private volatile bool _debugDrops;
+    private volatile bool _verboseLog;
+
+    // When on: log every packet in both directions (truncated).
+    // Use this to discover dialog names, button IDs, and unknown packet types.
+    public bool VerboseLog
+    {
+        get => _verboseLog;
+        set { _verboseLog = value; _log.Info($"[VERBOSE] Packet logging {(value ? "ON" : "OFF")} — all packets will appear in [AURA] log."); }
+    }
+
+    private FarmFeature?      _farmFeature;
+    private ProvidersFeature? _providersFeature;
+    private AutoBuyFeature?   _autoBuyFeature;
+    private ProxyCommands?    _proxyCommands;
+
+    public void SetFarmFeature(FarmFeature? f)           => _inbox.Enqueue(() => _farmFeature      = f);
+    public void SetProvidersFeature(ProvidersFeature? p) => _inbox.Enqueue(() => _providersFeature = p);
+    public void SetAutoBuyFeature(AutoBuyFeature? b)     => _inbox.Enqueue(() => _autoBuyFeature   = b);
+    public void SetProxyCommands(ProxyCommands? c)       => _inbox.Enqueue(() => _proxyCommands    = c);
     public bool DebugDrops { get => _debugDrops; set => _debugDrops = value; }
 
     public AuraProxy(AuraLog log) => _log = log;
@@ -73,11 +97,47 @@ public sealed class AuraProxy : IDisposable
     public void SetFishingFeature(FishingFeature? feature) =>
         _inbox.Enqueue(() => _fishFeature = feature);
 
+    // Wire a SurgeryFeature in or out.
+    public void SetSurgeryFeature(SurgeryFeature? feature) =>
+        _inbox.Enqueue(() => _surgFeature = feature);
+
+    // QoL: skip gazette (login news dialog)
+    public bool SkipGazette { get; set; }
+    public event Action? GazetteArrived; // fires on UI thread when gazette is detected
+
+    // Set by WrenchTile, cleared immediately when the first type=0 is intercepted.
+    private (int X, int Y)? _pendingDoorFetch;
+    // Holds the door tile coords while we wait for the dialog response.
+    private (int X, int Y)? _capturedDoorTile;
+
+    // Fired on the UI thread when the server returns a door's own ID.
+    public event Action<int, int, string>? DoorIdCaptured; // (tileX, tileY, ownId)
+
+    /// <summary>
+    /// Sends a wrench (type=3 with wrench item ID=32) to a tile via the proxy.
+    /// The server responds with OnDialogRequest if the player has permission.
+    /// The door's own ID is parsed from the response and fired via DoorIdCaptured.
+    /// </summary>
+    /// <summary>
+    /// Requests a door's own ID. Sets _pendingDoorFetch so that the next type=0
+    /// position packet from the game is intercepted in InspectFromGame, its
+    /// PosX/PosY spoofed to the door tile, and a wrench (type=3) is queued
+    /// immediately after. Server sees player at the door and returns the dialog.
+    /// </summary>
+    public void WrenchTile(int tileX, int tileY) =>
+        _inbox.Enqueue(() => _pendingDoorFetch = (tileX, tileY));
+
     // Send a raw packet to the server from any thread (used by FishingFeature).
     public void EnqueueToServer(byte[] data) => _inbox.Enqueue(() =>
     {
         if (_serverPeer != IntPtr.Zero && _serverReady)
             Send(_serverPeer, 0, data);
+    });
+
+    // Send a packet to the game client (appears as if from server — used by ProxyCommands).
+    public void SendToGameClient(byte[] data) => _inbox.Enqueue(() =>
+    {
+        if (_gamePeer != IntPtr.Zero) Send(_gamePeer, 0, data);
     });
 
     public void Start(ushort preferredPort = 16999)
@@ -226,6 +286,9 @@ public sealed class AuraProxy : IDisposable
         if (_serverPeer == IntPtr.Zero)
         {
             _log.Error($"Could not start a connection to {target.Value.Ip}:{target.Value.Port}.");
+            _log.Warn("If you're on home WiFi and this works on mobile data, your router or ISP " +
+                       "may be blocking UDP on Growtopia's game server ports (17000-17200). " +
+                       "Try: router settings → open UDP 17000-17200 outbound, or use mobile hotspot.");
             AuraNative.aura_peer_disconnect(peer, 0);
             return;
         }
@@ -269,17 +332,20 @@ public sealed class AuraProxy : IDisposable
     private void OnGamePacket(IntPtr peer, byte channel, byte[] data)
     {
         if (peer != _gamePeer) return;
-        InspectFromGame(data);
+        var toSend = InspectFromGame(data) ?? data;  // null = forward unchanged
 
-        if (_serverReady && _serverPeer != IntPtr.Zero) Send(_serverPeer, channel, data);
-        else if (_backlog.Count < 512) _backlog.Enqueue((channel, data));
+        if (toSend.Length == 0) return; // Array.Empty = explicitly dropped, send nothing
+
+        if (_serverReady && _serverPeer != IntPtr.Zero) Send(_serverPeer, channel, toSend);
+        else if (_backlog.Count < 512) _backlog.Enqueue((channel, toSend));
     }
 
     private void OnServerPacket(IntPtr peer, byte channel, byte[] data)
     {
         if (peer != _serverPeer) return;
-        data = InspectFromServer(data);
-        if (_gamePeer != IntPtr.Zero) Send(_gamePeer, channel, data);
+        var toSend = InspectFromServer(data);
+        if (toSend.Length == 0) return;           // packet suppressed (e.g. gazette skip)
+        if (_gamePeer != IntPtr.Zero) Send(_gamePeer, channel, toSend);
     }
 
     private void Send(IntPtr peer, byte channel, byte[] data)
@@ -291,14 +357,62 @@ public sealed class AuraProxy : IDisposable
     // ── Packet inspection ───────────────────────────────────────────
 
     // Only world actions are looked at. Login text is never stored or logged.
-    private void InspectFromGame(byte[] data)
+    // Returns a modified packet to forward, or null to forward original unchanged.
+    private byte[]? InspectFromGame(byte[] data)
     {
         if (GameUpdate.TryRead(data, out var gu))
         {
+            if (_verboseLog && gu.Type != 0)
+                _log.Info($"[PKT→SRV] GamePkt type={gu.Type} intData={gu.IntData} flags={gu.Flags} intX={gu.IntX} intY={gu.IntY} pos=({gu.PosX:0},{gu.PosY:0})");
+
             // Log all game→server GamePackets except type 0 (movement, too frequent)
             // and type 11 (pickup, handled separately). Used to find the PULL packet.
             if (_fishFeature is { LoggingEnabled: true } && gu.Type != 0 && gu.Type != 11)
                 _log.Info($"[Fish] game   GamePacket type={gu.Type} netId={gu.NetId} intData={gu.IntData} pos=({gu.PosX:0},{gu.PosY:0}) flags={gu.Flags} intX={gu.IntX} intY={gu.IntY}");
+
+            // ── Door ID fetch: intercept the next type=0 packet and spoof position ──
+            // This is the most reliable proximity bypass: we use the game's own
+            // position packet (correct NetId, flags, velocity) and only change PosX/PosY
+            // to place the player at the door tile. The server updates its position
+            // tracking, then we immediately send the wrench packet after.
+            if (gu.Type == 0 && _pendingDoorFetch.HasValue)
+            {
+                var (wx, wy) = _pendingDoorFetch.Value;
+                _pendingDoorFetch = null; // ← clear immediately so only ONE packet is spoofed
+
+                const float TP = 32f;
+                float spx = wx * TP + 10f;
+                float spy = wy * TP;
+                int   nid = gu.NetId;
+
+                var mod = (byte[])data.Clone();
+                System.Buffers.Binary.BinaryPrimitives.WriteSingleLittleEndian(mod.AsSpan(4 + 24), spx);
+                System.Buffers.Binary.BinaryPrimitives.WriteSingleLittleEndian(mod.AsSpan(4 + 28), spy);
+
+                // Store coords for the dialog capture BEFORE clearing pendingDoorFetch.
+                _capturedDoorTile = (wx, wy);
+
+                // Enqueue wrench — processed on the same thread after this packet is sent
+                int cx = wx, cy = wy;
+                _inbox.Enqueue(() =>
+                {
+                    if (_serverPeer == IntPtr.Zero || !_serverReady) return;
+                    float px2 = cx * TP + 10f, py2 = cy * TP;
+                    var wrench = new byte[4 + 56];
+                    System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(wrench, NetMessage.GamePacket);
+                    wrench[4] = 3;
+                    System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(wrench.AsSpan(4 + 4),  nid);
+                    System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(wrench.AsSpan(4 + 12), 0x200);
+                    System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(wrench.AsSpan(4 + 20), 32);
+                    System.Buffers.Binary.BinaryPrimitives.WriteSingleLittleEndian(wrench.AsSpan(4 + 24), px2);
+                    System.Buffers.Binary.BinaryPrimitives.WriteSingleLittleEndian(wrench.AsSpan(4 + 28), py2);
+                    System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(wrench.AsSpan(4 + 44), cx);
+                    System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(wrench.AsSpan(4 + 48), cy);
+                    Send(_serverPeer, 0, wrench);
+                });
+
+                return mod;
+            }
 
             // type=3 (PACKET_SEND_TILE_UPDATE_REQUEST) with a known fishing rod ID = cast or pull.
             // FishingFeature stores the packet bytes to replay as the auto-pull.
@@ -311,7 +425,7 @@ public sealed class AuraProxy : IDisposable
                 var result = _world.NotePickupRequest(gu.IntData, gu.PosX, gu.PosY);
                 if (_debugDrops)
                     _log.Info($"Pickup request from the game: id={gu.IntData} pos=({gu.PosX:0},{gu.PosY:0}) => {result}");
-                return;
+                return null;
             }
 
             // PACKET_STATE (0): the player's own movement, sent many times a second.
@@ -324,15 +438,39 @@ public sealed class AuraProxy : IDisposable
                 _playerY   = gu.PosY;
                 _hasPlayer = true;
             }
-            return;
+            return null;
         }
 
-        if (!TextMessage.TryRead(data, out var text)) return;
+        if (!TextMessage.TryRead(data, out var text)) return null;
 
-        // Fish feature sees all game→server text (logger + pull detection).
+        if (_verboseLog)
+            _log.Info($"[PKT→SRV] Text: {text.Replace('\n','|').Substring(0, Math.Min(300, text.Length))}");
+
+        // Auto Buy: intercept shop buy clicks
+        if (_autoBuyFeature != null && text.StartsWith("action|buy|item|", StringComparison.Ordinal))
+            _autoBuyFeature.OnGameBuyAction(text);
+
+        // Both features see all game→server text.
         _fishFeature?.OnGameText(text);
+        _surgFeature?.OnGameText(text);
 
-        if (!text.StartsWith("action|", StringComparison.Ordinal)) return;
+        // Proxy commands intercept /pdest /pid /cldd before they reach server.
+        // Return Array.Empty to signal "drop this packet" (null = forward unchanged).
+        if (_proxyCommands != null && _proxyCommands.OnGameText(text))
+            return Array.Empty<byte>();
+
+        // Capture GrowID from the login packet.
+        if (text.StartsWith("tankIDName|", StringComparison.Ordinal))
+        {
+            var growId = TextMessage.Value(text, "tankIDName");
+            if (!string.IsNullOrEmpty(growId) && growId != _localPlayerName)
+            {
+                _localPlayerName = growId;
+                PlayerNameChanged?.Invoke(growId);
+            }
+        }
+
+        if (!text.StartsWith("action|", StringComparison.Ordinal)) return null;
 
         if (text.StartsWith("action|join_request", StringComparison.Ordinal))
         {
@@ -341,6 +479,7 @@ public sealed class AuraProxy : IDisposable
             _hasPlayer = false;
             _world.Leave();
             _worldDirty = true;
+            _surgFeature?.OnWorldChanged();
         }
         else if (text.StartsWith("action|quit_to_exit", StringComparison.Ordinal))
         {
@@ -348,16 +487,26 @@ public sealed class AuraProxy : IDisposable
             _hasPlayer = false;
             _world.Leave();
             _worldDirty = true;
+            _surgFeature?.OnWorldChanged();
+            _farmFeature?.OnWorldChanged();
             SetStatus(AuraState.Connected, "Connected");
         }
+        return null;
     }
+
+    // Called after world view is published — update ProvidersFeature with new Fg tile data
+    public void NotifyProvidersWorldChanged(WorldView? world) =>
+        _inbox.Enqueue(() => _providersFeature?.OnWorldChanged(world));
 
     private static readonly System.Text.RegularExpressions.Regex CollectedLine =
         new(@"^Collected (\d+) (.+?)\.(?:\sRarity: \d+)?\s*$", System.Text.RegularExpressions.RegexOptions.CultureInvariant);
 
     private void HandleConsoleMessage(VariantList vl)
     {
-        if (_world.CurrentWorld == null || vl.Items.Count < 2 || vl.Items[1].S is not string raw) return;
+        if (vl.Items.Count < 2 || vl.Items[1].S is not string raw) return;
+        // Forward to AutoBuy for inventory-full detection
+        _autoBuyFeature?.OnServerMessage(raw);
+        if (_world.CurrentWorld == null) return;
         var text = StripColors(raw);
         if (!text.StartsWith("Collected ", StringComparison.Ordinal)) return;
 
@@ -384,20 +533,33 @@ public sealed class AuraProxy : IDisposable
 
     private byte[] InspectFromServer(byte[] data)
     {
-        // Server plain text (NetMessage 2 or 3) — route to fish feature for logging.
+        // Server plain text (NetMessage 2 or 3) — route to features for logging.
         // These are NOT game packets (type 4) so they fall through GameUpdate.TryRead.
         if (TextMessage.TryRead(data, out var serverText))
         {
+            if (_verboseLog)
+                _log.Info($"[SRV→PKT] Text: {serverText.Replace('\n','|').Substring(0, Math.Min(300, serverText.Length))}");
             _fishFeature?.OnServerText(serverText);
+            _surgFeature?.OnServerText(serverText);
             return data;
         }
 
         if (!GameUpdate.TryRead(data, out var gu)) return data;
 
+        if (_verboseLog && gu.Type != 0) // skip position spam
+            _log.Info($"[SRV→PKT] GamePkt type={gu.Type} netId={gu.NetId} intData={gu.IntData} flags={gu.Flags}");
+
         switch (gu.Type)
         {
             case GamePacketType.CallFunction:
                 if (!VariantList.TryParse(data, GameUpdate.ExtraStart, gu.ExtraLength, out var vl)) break;
+                if (_verboseLog)
+                {
+                    string vlBody = vl.Items.Count > 1 && vl.Items[1].Type == VariantList.TString
+                        ? vl.Items[1].S.Replace('\n','|').Substring(0, Math.Min(400, vl.Items[1].S.Length))
+                        : "";
+                    _log.Info($"[SRV→PKT] CallFn={vl.Function} body={vlBody}");
+                }
                 switch (vl.Function)
                 {
                     case "OnSendToServer":
@@ -411,8 +573,88 @@ public sealed class AuraProxy : IDisposable
                         SetStatus(AuraState.Connected, "Connected");
                         break;
                     default:
-                        // Route all other CallFunctions to fish (logger + bite detection).
+                        // Route to features first — Insta auto-action + logging.
                         _fishFeature?.OnCallFunction(vl.Function ?? "", vl);
+                        _surgFeature?.OnCallFunction(vl.Function ?? "", vl);
+
+                        // Manual surgery highlight: modify the dialog AFTER the feature
+                        // has processed it, then rebuild the packet sent to the game.
+                        if (vl.Function == "OnDialogRequest"
+                            && _surgFeature != null
+                            && vl.Items.Count > 1
+                            && vl.Items[1].Type == VariantList.TString)
+                        {
+                            string? modified = _surgFeature.ModifyDialogForManual(vl.Items[1].S);
+                            if (modified != null)
+                            {
+                                vl.Items[1].S = modified;
+                                return VariantList.RebuildCallFunction(data, gu, vl.Serialize());
+                            }
+                        }
+
+                        // Auto Buy: shop purchase confirmation
+                        if (vl.Function == "OnStorePurchaseResult" && _autoBuyFeature != null
+                            && vl.Items.Count > 1 && vl.Items[1].Type == VariantList.TString)
+                            _autoBuyFeature.OnStorePurchaseResult(vl.Items[1].S);
+
+
+                        // QoL: auto-dismiss the Gazette (login news dialog)
+                        if (vl.Function == "OnDialogRequest"
+                            && vl.Items.Count > 1
+                            && vl.Items[1].Type == VariantList.TString
+                            && vl.Items[1].S.Contains("end_dialog|gazette", StringComparison.Ordinal))
+                        {
+                            GazetteArrived?.Invoke();
+                            if (SkipGazette)
+                            {
+                                // Send dismiss to server then DROP the dialog — game never sees it.
+                                // Array.Empty = "suppress this packet" signal in OnServerPacket.
+                                EnqueueToServer(BuildTextPacket(
+                                    "action|dialog_return\ndialog_name|gazette\nbuttonClicked|banner|\n"));
+                                return Array.Empty<byte>();
+                            }
+                        }
+
+                        // ProxyCommands: pre-fill door destination or ID fields (/pdest /pid)
+                        if (vl.Function == "OnDialogRequest"
+                            && _proxyCommands != null
+                            && vl.Items.Count > 1
+                            && vl.Items[1].Type == VariantList.TString
+                            && vl.Items[1].S.Contains("Door", StringComparison.OrdinalIgnoreCase))
+                        {
+                            string? filled = _proxyCommands.OnDoorDialog(vl.Items[1].S);
+                            if (filled != null)
+                            {
+                                vl.Items[1].S = filled;
+                                return VariantList.RebuildCallFunction(data, gu, vl.Serialize());
+                            }
+                        }
+
+                        // Capture door own ID from wrench response.
+                        if (vl.Function == "OnDialogRequest" && _capturedDoorTile.HasValue
+                            && vl.Items.Count > 1 && vl.Items[1].Type == VariantList.TString)
+                        {
+                            string dlg = vl.Items[1].S;
+                            if (dlg.Contains("Edit", StringComparison.OrdinalIgnoreCase)
+                                && dlg.Contains("Door", StringComparison.OrdinalIgnoreCase))
+                            {
+                                string ownId = ParseDoorOwnId(dlg);
+                                if (!string.IsNullOrEmpty(ownId))
+                                {
+                                    var (tx, ty) = _capturedDoorTile.Value;
+                                    _world.SetDoorId(tx, ty, ownId);
+                                    _worldDirty = true;
+                                    var captured = DoorIdCaptured;
+                                    if (captured != null)
+                                    {
+                                        int cx = tx, cy = ty;
+                                        Task.Run(() => captured(cx, cy, ownId));
+                                    }
+                                    _log.Info($"[Doors] ID found for door at ({tx},{ty}): {ownId}");
+                                }
+                                _capturedDoorTile = null;
+                            }
+                        }
                         break;
                 }
                 break;
@@ -436,6 +678,10 @@ public sealed class AuraProxy : IDisposable
 
             case GamePacketType.ItemChangeObject:
             {
+                // Notify FarmFeature of new drops for break detection
+                if (gu.NetId == -1 && _farmFeature != null)
+                    _farmFeature.OnItemDropped(gu.PosX, gu.PosY);
+
                 uint target   = unchecked((uint)gu.ItemNetId);
                 bool knownBef = _world.HasObject(target);
                 uint lastBef  = _world.LastUid;
@@ -510,6 +756,32 @@ public sealed class AuraProxy : IDisposable
         {
             return null;
         }
+    }
+
+    // Parse the door's own ID from an "Edit Door" OnDialogRequest dialog string.
+    // Growtopia sends: add_text_input|id|<value>|<maxlen>|
+    private static byte[] BuildTextPacket(string text)
+    {
+        var body   = System.Text.Encoding.Latin1.GetBytes(text + "\0");
+        var packet = new byte[4 + body.Length];
+        System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(packet, NetMessage.GenericText);
+        Buffer.BlockCopy(body, 0, packet, 4, body.Length);
+        return packet;
+    }
+
+    private static string ParseDoorOwnId(string dialog)
+    {
+        // Try add_text_input format: add_text_input|id|FAF|24|
+        var m = System.Text.RegularExpressions.Regex.Match(
+            dialog, @"add_text_input\|id\|([^|]*)\|", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        if (m.Success) return m.Groups[1].Value.Trim();
+
+        // Try embed_data format: embed_data|id|FAF|
+        m = System.Text.RegularExpressions.Regex.Match(
+            dialog, @"embed_data\|id\|([^|]*)\|", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        if (m.Success) return m.Groups[1].Value.Trim();
+
+        return "";
     }
 
     private void SetStatus(AuraState state, string detail)

@@ -27,6 +27,7 @@ public sealed class WorldSnapshot
     public string? Note;
     public List<DroppedObject> Objects = new();
     public List<VendInfo>      Vends   = new();
+    public List<DoorInfo>      Doors   = new();
     public ushort[] Fg = Array.Empty<ushort>();   // foreground block per tile (0 = empty)
     public ushort[] Bg = Array.Empty<ushort>();   // background per tile
     public int TilesRead;                         // tiles read before an unknown type stopped the parser
@@ -148,7 +149,14 @@ public static class WorldParser
     {
         switch (type)
         {
-            case 1:  r.SkipStr16(); r.Skip(1); break;                      // door
+            case 1:                                                        // door
+            {
+                string dest = r.Str16();
+                r.Skip(1); // door flags
+                uint dw = Math.Max(1u, w.Width);
+                w.Doors.Add(new DoorInfo((int)(index % dw), (int)(index / dw), fg, dest));
+                break;
+            }
             case 2:  r.SkipStr16(); r.Skip(4); break;                      // sign
             case 3:                                                        // lock
                 r.Skip(1 + 4);

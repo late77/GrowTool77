@@ -33,13 +33,21 @@ public sealed class FishingFeature
 
     public bool IsRunning      => _running;
     public bool LoggingEnabled { get => _logAll; set => _logAll = value; }
+    public bool SafetyEnabled  { get; set; } = true;
+    public float SafetyPx      { get; set; } = 48f;
+
+    private float? _safeX, _safeY;
+    private readonly Func<(bool Ok, float X, float Y)>? _getPlayer;
+    public event Action? SafetyTriggered;
 
     public event Action<string>? StatusChanged;
 
-    public FishingFeature(Action<byte[]> sendToServer, AuraLog log)
+    public FishingFeature(Action<byte[]> sendToServer, AuraLog log,
+                           Func<(bool, float, float)>? getPlayer = null)
     {
         _sendToServer = sendToServer;
         _log          = log;
+        _getPlayer    = getPlayer;
     }
 
     public void Start()
@@ -47,6 +55,11 @@ public sealed class FishingFeature
         _running    = true;
         _state      = FishState.Idle;
         _castPacket = null;
+        if (_getPlayer != null)
+        {
+            var (ok, px, py) = _getPlayer();
+            if (ok) { _safeX = px; _safeY = py; }
+        }
         Fire("Active — cast your rod to begin");
         _log.Info("[Fish] Auto-fish started.");
     }
@@ -68,7 +81,25 @@ public sealed class FishingFeature
     // Game sent type=3 with a known fishing rod ID → new cast, store packet.
     internal void OnFishingAction(byte[] rawPacket)
     {
-        if (_state == FishState.DelayingPull) return; // our own pull bouncing back
+        if (_state == FishState.DelayingPull) return;
+
+        // Safety: check if player moved too far from start position
+        if (SafetyEnabled && _getPlayer != null && _safeX.HasValue && _safeY.HasValue)
+        {
+            var (ok, px, py) = _getPlayer();
+            if (ok)
+            {
+                float dx = px - _safeX.Value, dy = py - _safeY.Value;
+                if (dx * dx + dy * dy > SafetyPx * SafetyPx)
+                {
+                    _running = false;
+                    _log.Info("[Fish] Safety triggered — player moved.");
+                    SafetyTriggered?.Invoke();
+                    Fire("Safety triggered — stopped");
+                    return;
+                }
+            }
+        }
         _castPacket = (byte[])rawPacket.Clone();
         _state      = FishState.WaitingBite;
         if (_logAll) _log.Info($"[Fish] Cast stored ({rawPacket.Length} bytes) — waiting for bite.");

@@ -417,7 +417,8 @@ public sealed class LineOverlay : Form
         }
 
         // Arrows: the Shifty Block's own texture tinted with the current colour, outlined, opaque.
-        using var tinted = Tint(_shiftyTexture, colour);
+        // Solid arrows — texture was causing visual artifacts.
+        using var tinted = (Bitmap?)null;
         using var outline = new Pen(Color.FromArgb(255, 24, 24, 24), Math.Max(2f, geo.Tile / 18f)) { LineJoin = LineJoin.Round };
         foreach (var arrow in LineGeometry.Arrows(geo))
         {
@@ -531,5 +532,90 @@ public sealed class LineOverlay : Form
             _canvas?.Dispose();
         }
         base.Dispose(disposing);
+    }
+
+    // ── Surgery manual overlay hint (added v0.7) ─────────────────────
+    // Drawn as a floating banner at the bottom-left of the overlay.
+    private volatile int    _surgeryHintSlot  = -1;
+    private          string _surgeryHintLabel = "";
+
+    public int    SurgeryHintSlot  { get => _surgeryHintSlot;  set { _surgeryHintSlot  = value; } }
+    public string SurgeryHintLabel { get => _surgeryHintLabel; set { _surgeryHintLabel = value; } }
+
+    // ── Farm selection mode (added v0.7) ─────────────────────────────
+    private bool _farmSelectMode;
+    private readonly HashSet<(int X, int Y)> _selectedFarmTiles = new();
+    private bool _escWasDown;
+
+    public event Action<List<TilePos>>? FarmSelectionComplete;
+
+    public bool FarmSelectMode
+    {
+        get => _farmSelectMode;
+        set
+        {
+            if (_farmSelectMode == value) return;
+            _farmSelectMode = value;
+            SetClickThrough(!value);
+            if (value)
+            {
+                KeyPreview = true;
+                _timer.Start();
+            }
+            else
+            {
+                KeyPreview = false;
+                if (_targets.Count == 0) _timer.Stop();
+            }
+        }
+    }
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")] private static extern int   GetWindowLong(IntPtr h, int n);
+    [System.Runtime.InteropServices.DllImport("user32.dll")] private static extern int   SetWindowLong(IntPtr h, int n, int v);
+    [System.Runtime.InteropServices.DllImport("user32.dll")] private static extern short GetAsyncKeyState(int vk);
+
+    private void SetClickThrough(bool pass)
+    {
+        if (!IsHandleCreated) return;
+        const int GWL = -20, T = 0x20;
+        int s = GetWindowLong(Handle, GWL);
+        SetWindowLong(Handle, GWL, pass ? s | T : s & ~T);
+    }
+
+    public void SetFarmSelectTiles(IEnumerable<TilePos> existing)
+    {
+        _selectedFarmTiles.Clear();
+        foreach (var t in existing) _selectedFarmTiles.Add((t.X, t.Y));
+    }
+
+    protected override void OnMouseUp(MouseEventArgs e)
+    {
+        if (!_farmSelectMode) { base.OnMouseUp(e); return; }
+        if (e.Button != MouseButtons.Left) { base.OnMouseUp(e); return; }
+        var area = _area;
+        if (area == null) { base.OnMouseUp(e); return; }
+        int wW = area.Screen.Width, wH = area.Screen.Height;
+        var sol = _solution;
+        float camX, camY, scale;
+        if (sol != null && sol.Fix.Matched)
+        {
+            scale = sol.Fix.TilePixels / 32f;
+            var (ok, px, py) = _player();
+            camX = sol.Fix.CamX + ((ok ? px + 10 : sol.PlayerCX) - sol.PlayerCX);
+            camY = sol.Fix.CamY + ((ok ? py + 15 : sol.PlayerCY) - sol.PlayerCY);
+        }
+        else
+        {
+            float est = wW / 25f; scale = est / 32f;
+            var (ok, px, py) = _player();
+            camX = ok ? px + 10 : wW / (2f * scale);
+            camY = ok ? py + 15 : wH / (2f * scale);
+        }
+        float wx = (e.X - wW / 2f) / scale + camX;
+        float wy = (e.Y - wH / 2f) / scale + camY;
+        var key = ((int)MathF.Floor(wx / 32f), (int)MathF.Floor(wy / 32f));
+        if (_selectedFarmTiles.Contains(key)) _selectedFarmTiles.Remove(key);
+        else                                   _selectedFarmTiles.Add(key);
+        base.OnMouseUp(e);
     }
 }

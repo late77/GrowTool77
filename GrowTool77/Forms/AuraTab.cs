@@ -12,6 +12,7 @@ public class AuraTab : Panel
     private readonly TextBox _text;
 
     public event Action<bool>? DebugDropsChanged;
+    public event Action<bool>? VerboseLogChanged;
     public event Action?       SaveLinesSnapshot;
 
     public AuraTab(AuraLog log)
@@ -22,10 +23,10 @@ public class AuraTab : Panel
 
         Controls.Add(Ui.Lbl("[AURA] log", Theme.R(28, 12, 300, 22), Theme.Section, Theme.Gold));
 
-        var card = new Card { Bounds = Theme.R(24, 36, 832, 326) };
+        var card = new Card { Bounds = Theme.R(24, 36, 832, 298) }; // shortened to fit verbose checkbox below
         _text = new TextBox
         {
-            Bounds      = Theme.R(16, 14, 800, 298),
+            Bounds      = Theme.R(16, 14, 800, 270),
             Multiline   = true,
             ReadOnly    = true,
             WordWrap    = false,
@@ -64,10 +65,22 @@ public class AuraTab : Panel
         };
         debug.CheckedChanged += (_, _) => DebugDropsChanged?.Invoke(debug.Checked);
 
+        // Verbose mode: logs ALL packets in both directions — use to discover dialog formats
+        var verbose = new CheckBox
+        {
+            Text      = "Log ALL packets (verbose — use to find dialog IDs)",
+            Bounds    = Theme.R(280, 340, 430, 30),
+            Font      = Theme.Small,
+            ForeColor = Color.FromArgb(255, 220, 100),
+            BackColor = Theme.Bg,
+            AutoSize  = false,
+        };
+        verbose.CheckedChanged += (_, _) => VerboseLogChanged?.Invoke(verbose.Checked);
+
         var snapshot = new GtButton("Save lines snapshot", ButtonKind.Secondary) { Bounds = Theme.R(516, 374, 166, 36) };
         snapshot.Click += (_, _) => SaveLinesSnapshot?.Invoke();
 
-        Controls.AddRange(new Control[] { copy, clear, debug, snapshot, note });
+        Controls.AddRange(new Control[] { copy, clear, debug, verbose, snapshot, note });
 
         foreach (var line in _log.Lines()) Append(line);
     }

@@ -8,6 +8,10 @@ public sealed record ScanEntry(int ItemId, string Name, int Amount, int Stacks, 
 // Blocks of one kind placed in the world (foreground or background layer).
 public sealed record PlacedEntry(int ItemId, string Name, int Count, bool Background, IReadOnlyList<TilePos> Tiles);
 
+// A door tile with its linked destination world name and (optionally) its own ID.
+// OwnId is blank until the server returns it via a wrench packet response.
+public sealed record DoorInfo(int X, int Y, int FgItemId, string Destination, string OwnId = "");
+
 // Vending machines seen in one world during this session (memory only).
 public sealed record WorldVends(string World, DateTime Seen, IReadOnlyList<VendInfo> Vends, bool Partial);
 
@@ -25,7 +29,8 @@ public sealed record WorldView(
     bool PlacedComplete,
     DateTime Entered,
     ushort[] Fg,
-    ushort[] Bg);
+    ushort[] Bg,
+    IReadOnlyList<DoorInfo> Doors);
 
 // Keeps the current world and its dropped objects up to date.
 // Lives on the [AURA] network thread; hands immutable WorldView copies to the UI.
@@ -42,6 +47,7 @@ internal sealed class WorldTracker
     private DateTime _entered;
     private bool    _placedComplete;
     private List<(int ItemId, bool Background, List<TilePos> Tiles)> _placed = new();
+    private List<DoorInfo> _doors = new();
     private ushort[] _fg = Array.Empty<ushort>(), _bg = Array.Empty<ushort>();
 
     // Set by the proxy from the game's own position updates (world pixels).
@@ -69,6 +75,19 @@ internal sealed class WorldTracker
     // Every world entered this session; never written to disk.
     public IReadOnlyList<WorldVends> VendSnapshot() => _vendsByWorld.Values.ToList();
 
+    // Called when the server returns a door's own ID from a wrench packet response.
+    public void SetDoorId(int tileX, int tileY, string ownId)
+    {
+        for (int i = 0; i < _doors.Count; i++)
+        {
+            if (_doors[i].X == tileX && _doors[i].Y == tileY)
+            {
+                _doors[i] = _doors[i] with { OwnId = ownId };
+                return;
+            }
+        }
+    }
+
     public void Enter(WorldSnapshot snapshot)
     {
         _vendsByWorld[snapshot.Name] = new WorldVends(snapshot.Name, DateTime.Now, snapshot.Vends.ToList(), !snapshot.TilesParsed);
@@ -83,6 +102,7 @@ internal sealed class WorldTracker
         _height  = (int)snapshot.Height;
         _entered = DateTime.Now;
         _placed  = BuildPlaced(snapshot);
+        _doors   = snapshot.Doors ?? new();
         _fg      = snapshot.Fg;
         _bg      = snapshot.Bg;
         _placedComplete = snapshot.Fg.Length > 0 && snapshot.TilesRead >= snapshot.Fg.Length;
@@ -325,7 +345,8 @@ internal sealed class WorldTracker
             .ToList();
 
         return new WorldView(_name, groups, gems, total, _exact, note, DateTime.Now,
-                             _width, _height, placed, _placedComplete, _entered, _fg, _bg);
+                             _width, _height, placed, _placedComplete, _entered, _fg, _bg,
+                             _doors.ToList());
     }
 }
 

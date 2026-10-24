@@ -1,10 +1,11 @@
+// lang: C#, file: Theme.cs, target: .NET 8 Windows WinForms, proj: GrowTool77
+// St. Patrick's palette — v2: richer depth, modern contrast, Green Beer edition.
 using System.Drawing.Drawing2D;
 
 namespace GrowTool77.Modules;
 
 public static class Theme
 {
-    // Layout is designed at 96 DPI and scaled by S()/R() to the screen's DPI.
     public const int DesignW = 880;
     public const int DesignH = 560;
 
@@ -38,41 +39,51 @@ public static class Theme
         Symbol    = new Font("Segoe UI Symbol", 32 * Scale, FontStyle.Regular, GraphicsUnit.Pixel);
     }
 
-    // Fonts in pixels so text grows exactly as much as the layout does.
     private static Font F(float px, FontStyle style = FontStyle.Regular) =>
         new("Segoe UI", px * Scale, style, GraphicsUnit.Pixel);
 
     public static int S(int v) => (int)Math.Round(v * Scale);
     public static Rectangle R(int x, int y, int w, int h) => new(S(x), S(y), S(w), S(h));
 
-    // St. Patrick's palette — bright clover green, gold, white
-    public static readonly Color Bg             = Color.FromArgb(62, 160, 62);
-    public static readonly Color Header         = Color.FromArgb(34, 104, 36);
-    public static readonly Color HeaderDeep     = Color.FromArgb(24, 80, 26);
-    public static readonly Color Card           = Color.FromArgb(40, 120, 42);
-    public static readonly Color CardAlt        = Color.FromArgb(46, 131, 48);
-    public static readonly Color CardRim        = Color.FromArgb(120, 205, 110);
-    public static readonly Color Input          = Color.FromArgb(26, 88, 28);
-    public static readonly Color InputRim       = Color.FromArgb(90, 170, 86);
-    public static readonly Color Divider        = Color.FromArgb(72, 152, 70);
+    // ── Palette: St. Patrick's Green Beer ────────────────────────────
+    // Background: vibrant clover green
+    public static readonly Color Bg             = Color.FromArgb(54,  145, 54);
+    // Header: deep forest, premium feel
+    public static readonly Color Header         = Color.FromArgb(22,  78,  24);
+    public static readonly Color HeaderTop      = Color.FromArgb(28,  90,  30); // lighter top for gradient
+    public static readonly Color HeaderDeep     = Color.FromArgb(14,  56,  16);
+    // Cards: layered depth
+    public static readonly Color Card           = Color.FromArgb(36,  112, 38);
+    public static readonly Color CardTop        = Color.FromArgb(46,  130, 48); // lighter for gradient
+    public static readonly Color CardRim        = Color.FromArgb(100, 195, 92); // vivid rim
+    public static readonly Color CardAlt        = Color.FromArgb(42,  122, 44);
+    // Inputs: deep inset feel
+    public static readonly Color Input          = Color.FromArgb(18,  68,  20);
+    public static readonly Color InputRim       = Color.FromArgb(80,  160, 78);
+    public static readonly Color Divider        = Color.FromArgb(68,  148, 66);
+    // Gold: brass tap / Irish gold
     public static readonly Color Gold           = Color.FromArgb(255, 210, 40);
-    public static readonly Color GoldHover      = Color.FromArgb(255, 226, 110);
-    public static readonly Color GoldPress      = Color.FromArgb(225, 178, 20);
-    public static readonly Color GoldRim        = Color.FromArgb(170, 120, 0);
-    public static readonly Color OnGold         = Color.FromArgb(40, 60, 10);
+    public static readonly Color GoldHover      = Color.FromArgb(255, 228, 110);
+    public static readonly Color GoldPress      = Color.FromArgb(220, 174, 16);
+    public static readonly Color GoldRim        = Color.FromArgb(160, 115, 0);
+    public static readonly Color OnGold         = Color.FromArgb(35,  55,  8);
+    // Text
     public static readonly Color Text           = Color.White;
-    public static readonly Color TextDim        = Color.FromArgb(205, 238, 196);
-    public static readonly Color Good           = Color.FromArgb(140, 255, 140);
-    public static readonly Color Bad            = Color.FromArgb(255, 110, 100);
-    public static readonly Color Warn           = Color.FromArgb(255, 220, 90);
-    public static readonly Color Disabled       = Color.FromArgb(70, 122, 70);
-    public static readonly Color DisabledText   = Color.FromArgb(160, 196, 155);
-    public static readonly Color Secondary      = Color.FromArgb(30, 96, 32);
-    public static readonly Color SecondaryHover = Color.FromArgb(38, 114, 40);
-    public static readonly Color Danger         = Color.FromArgb(190, 60, 50);
-    public static readonly Color DangerHover    = Color.FromArgb(212, 76, 64);
-    public static readonly Color Selection      = Color.FromArgb(78, 158, 66);
+    public static readonly Color TextDim        = Color.FromArgb(200, 238, 192);
+    // Status
+    public static readonly Color Good           = Color.FromArgb(130, 255, 130);
+    public static readonly Color Bad            = Color.FromArgb(255, 105, 95);
+    public static readonly Color Warn           = Color.FromArgb(255, 220, 80);
+    // Interactive states
+    public static readonly Color Disabled       = Color.FromArgb(60,  118, 62);
+    public static readonly Color DisabledText   = Color.FromArgb(150, 192, 148);
+    public static readonly Color Secondary      = Color.FromArgb(28,  95,  30);
+    public static readonly Color SecondaryHover = Color.FromArgb(36,  112, 38);
+    public static readonly Color Danger         = Color.FromArgb(185, 55,  45);
+    public static readonly Color DangerHover    = Color.FromArgb(208, 72,  60);
+    public static readonly Color Selection      = Color.FromArgb(76,  156, 64);
 
+    // ── Geometry helpers ─────────────────────────────────────────────
     public static GraphicsPath Round(Rectangle r, int radius)
     {
         int d = Math.Max(2, Math.Min(radius * 2, Math.Min(r.Width, r.Height)));
