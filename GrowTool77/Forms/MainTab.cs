@@ -92,6 +92,20 @@ public class MainTab : Panel
 
         world.Controls.AddRange(new Control[] { _worldLbl, _worldSub });
         Controls.Add(world);
+
+        // ── Shadow ban reset ──────────────────────────────────────────
+        Controls.Add(Ui.Lbl("Shadow ban bypass", Theme.R(28, 352, 300, 22), Theme.Section, Theme.Gold));
+
+        var resetCard = new Card { Bounds = Theme.R(24, 376, 832, 96) };
+        resetCard.Controls.Add(Ui.Lbl(
+            "Resets Growtopia device fingerprint (save.dat + registry). Combine with airplane mode on mobile for full IP+device reset.",
+            Theme.R(20, 8, 600, 36), Theme.Small, Theme.TextDim, ContentAlignment.TopLeft));
+
+        var resetBtn  = new GtButton("Reset GT Fingerprint", ButtonKind.Danger) { Bounds = Theme.R(20, 50, 220, 36) };
+        var resetLbl  = Ui.Lbl("Stops Growtopia, clears device ID, requires restart", Theme.R(254, 56, 560, 26), Theme.Small, Theme.TextDim);
+        resetBtn.Click += (_, _) => ResetFingerprint(resetLbl);
+        resetCard.Controls.AddRange(new Control[] { resetBtn, resetLbl });
+        Controls.Add(resetCard);
     }
 
     public void SetGameStatus(GameStatus st)
@@ -181,6 +195,48 @@ public class MainTab : Panel
         if (!result.Success)
             MessageBox.Show(result.Message, "Could not launch Growtopia",
                 MessageBoxButtons.OK, MessageBoxIcon.Warning);
+    }
+
+    private void ResetFingerprint(Label statusLbl)
+    {
+        // Kill Growtopia process
+        foreach (var p in System.Diagnostics.Process.GetProcessesByName("Growtopia"))
+        {
+            try { p.Kill(); p.WaitForExit(2000); } catch { /* ignore */ }
+        }
+
+        var errors = new System.Text.StringBuilder();
+
+        // Delete save.dat (contains rid = Random ID, wk = Windows Key)
+        string saveDat = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "Growtopia", "save.dat");
+        if (File.Exists(saveDat))
+        {
+            try { File.Delete(saveDat); }
+            catch (Exception ex) { errors.AppendLine($"save.dat: {ex.Message}"); }
+        }
+
+        // Clear registry key (login history, tokens)
+        try
+        {
+            using var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(
+                @"Software\Growtopia", writable: true);
+            if (key != null)
+                foreach (var name in key.GetValueNames())
+                    try { key.DeleteValue(name); } catch { /* ignore */ }
+        }
+        catch (Exception ex) { errors.AppendLine($"Registry: {ex.Message}"); }
+
+        if (errors.Length > 0)
+        {
+            Ui.SetText(statusLbl, $"Partial reset — {errors}");
+        }
+        else
+        {
+            Ui.SetText(statusLbl, "Done — new device ID on next GT launch. Now toggle airplane mode on mobile for new IP.");
+            statusLbl.ForeColor = Theme.Good;
+        }
     }
 
     private void Browse()

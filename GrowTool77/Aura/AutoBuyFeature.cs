@@ -22,14 +22,17 @@ public sealed class AutoBuyFeature
     // ── Buy state ─────────────────────────────────────────────────────
     private string _buyCode  = "";
     private string _buyName  = "";
+    private string _buyTab   = "bigitems";
     private int    _receivedItemId;
     private long   _gemsLeft = -1;
+    private byte[]? _rawBuyPacket; // exact raw bytes of user's last buy click
 
     private volatile bool _running;
     private int  _targetCount;
     private int  _boughtCount;
     private int  _dropCount;
     private bool _waitingForDropDialog;
+    private bool _waitingForShop;   // sent re-open, waiting for OnStoreRequest
 
     private readonly Action<byte[]> _sendToServer;
     private readonly AuraLog        _log;
@@ -53,29 +56,71 @@ public sealed class AutoBuyFeature
 
     // ── AuraProxy hooks ───────────────────────────────────────────────
 
-    // Server → game: full shop listing
+    // Server → game: shop listing arrived (also signals shop is ready for next buy)
     public void OnStoreRequest(string body)
     {
         var parsed = ParseButtons(body);
         lock (_items) { _items.Clear(); _items.AddRange(parsed); }
         _log.Info($"[AutoBuy] Shop parsed: {parsed.Count} gem items.");
         ShopItemsUpdated?.Invoke(parsed);
+
+        // Running and waiting for shop to open → shop is now open, send buy
+        if (_running && _waitingForShop && !_waitingForDropDialog)
+        {
+            _waitingForShop = false;
+            Task.Delay(120).ContinueWith(_ => SendBuy());
+        }
     }
 
-    // Game → server: player clicked an item
+    // Called from AuraProxy with the raw ENet packet bytes when user clicks buy
+    public void CaptureRawBuyPacket(byte[] rawData, string code)
+    {
+        if (IsNavCode(code)) return;
+        _rawBuyPacket = (byte[])rawData.Clone(); // exact copy — byte-identical to game's packet
+        _log.Info($"[AutoBuy] Raw buy packet captured: {rawData.Length} bytes for code={code}");
+    }
+
+    // Game → server: player clicked an item in the shop
     public void OnGameBuyAction(string text)
     {
         var m = Regex.Match(text, @"action\|buy\|item\|([^|\s\x00-\x1F]+)\|");
         if (!m.Success) return;
         string code = m.Groups[1].Value;
         if (IsNavCode(code)) return;
-        _log.Info($"[AutoBuy] Buy click: {code}");
-        // If running and same code, continue; else notify UI
+        _log.Info($"[AutoBuy] Game buy: {code}");
+
+        // If running with same item → this click is #1, OnStorePurchaseResult handles #2+
+        if (_running && code == _buyCode)
+        {
+            Fire($"Click detected — waiting for server confirmation (#1/{_targetCount})");
+            return;
+        }
+
+        // Not running: notify UI of item selection
         if (!_running)
         {
             var item = _items.FirstOrDefault(i => i.Code == code);
             if (item != null) SelectItem(item);
         }
+    }
+
+    // Auto-start: called when raw packet captured and user has qty set
+    // Returns true if auto-started
+    public bool TryAutoStart(string code)
+    {
+        if (_running) return false;
+        if (code != _buyCode || _rawBuyPacket == null) return false;
+        if (_targetCount <= 0) return false;
+        // Raw packet captured and item matches — auto-start from #2
+        // #1 is the user's own click, handled by OnStorePurchaseResult
+        _boughtCount = 0;
+        _dropCount   = 0;
+        _waitingForDropDialog = false;
+        _waitingForShop = false;
+        _running = true;
+        Fire($"Armed! Click confirmed buy #1 — proxy takes over from #2/{_targetCount}");
+        _log.Info($"[AutoBuy] Auto-armed. Raw packet ready. {_targetCount}× {_buyName}");
+        return true;
     }
 
     // Game → server: item received
@@ -87,6 +132,9 @@ public sealed class AutoBuyFeature
     // Server → game: purchase result
     public void OnStorePurchaseResult(string body)
     {
+        // MUST check _running first — otherwise proxy drops user's manually-bought items!
+        if (!_running) return;
+
         bool isFull = body.Contains("don't have enough space", StringComparison.OrdinalIgnoreCase)
                    || body.Contains("not enough space", StringComparison.OrdinalIgnoreCase);
         if (isFull)
@@ -96,7 +144,6 @@ public sealed class AutoBuyFeature
             SendDropRequest();
             return;
         }
-        if (!_running) return;
 
         var gm = Regex.Match(body, @"You have\s*`\$([0-9,]+)``\s*Gems? left");
         if (gm.Success) long.TryParse(gm.Groups[1].Value.Replace(",",""), out _gemsLeft);
@@ -106,7 +153,8 @@ public sealed class AutoBuyFeature
         _log.Info($"[AutoBuy] #{_boughtCount} done. Gems: {_gemsLeft}");
 
         if (_boughtCount >= _targetCount) { Stop("Target reached!"); return; }
-        Task.Delay(80).ContinueWith(_ => SendBuy());
+        // Server confirmed purchase — shop stays open server-side, just buy again
+        Task.Delay(300).ContinueWith(_ => SendBuy());
     }
 
     // Server → game: drop dialog (server asks how many to drop)
@@ -126,8 +174,14 @@ public sealed class AutoBuyFeature
         SendGenericText($"action|dialog_return\ndialog_name|drop_item\nitemID|{itemId}|\ncount|{count}|\n");
 
         if (!_running) return;
-        Task.Delay(250).ContinueWith(_ => SendBuy());
-        Fire($"Dropped {count}× (#{_dropCount}) — resuming…");
+        Task.Delay(500).ContinueWith(_ =>
+        {
+            if (!_running) return;
+            SendGenericText($"action|store|location|gem|");
+            SendGenericText($"action|buy|item|bigitems|");
+            Task.Delay(300).ContinueWith(_ => SendBuy());
+        });
+        Fire($"Dropped {count}× (#{_dropCount}) — re-opening shop…");
     }
 
     // ── Public control ─────────────────────────────────────────────────
@@ -137,6 +191,24 @@ public sealed class AutoBuyFeature
         _buyCode = item.Code;
         _buyName = item.Name;
         Fire($"Selected: {item.Name} — {item.Price:N0} gems — set qty and Start");
+    }
+
+    // Called from AuraProxy when OnSetPearl arrives (login gem count)
+    public void SetGemsLeft(long gems) { if (gems > 0) _gemsLeft = gems; }
+
+    // Called from AuraProxy when game navigates to a shop tab (for re-open tracking)
+    public void OnShopTabNavigated(string tabCode)
+    {
+        if (!IsNavCode(tabCode)) return;
+        // Map nav code back to location string used by action|store|location|X|
+        _buyTab = tabCode switch
+        {
+            "bigitems" or "bigitems_menu" => "gem",     // Awesome Items is on gem tab
+            "itempack" or "itempack_menu" => "gem",
+            "locks"    or "locks_menu"    => "gem",
+            _ => "gem"
+        };
+        _log.Info($"[AutoBuy] Tab navigated: {tabCode} → re-open via location={_buyTab}");
     }
 
     public void SelectByCode(string code)
@@ -153,9 +225,10 @@ public sealed class AutoBuyFeature
         _dropCount   = 0;
         _waitingForDropDialog = false;
         _running     = true;
-        Fire($"Buying {quantity}× {_buyName}…");
-        _log.Info($"[AutoBuy] Start. {quantity}× code={_buyCode}");
-        SendBuy();
+        Fire($"Armed — open Shop, navigate to {_buyName}, click once to begin");
+        _log.Info($"[AutoBuy] Armed. {quantity}× {_buyCode}. Waiting for first confirmed buy.");
+        // No navigation packets sent — user opens shop manually to avoid OnStoreRequest spam
+        // that could trigger rate limiting. Proxy takes over from #2 after first user click.
     }
 
     public void Stop(string reason = "Stopped")
@@ -167,17 +240,38 @@ public sealed class AutoBuyFeature
 
     // ── Internals ──────────────────────────────────────────────────────
 
+    private void ReopenShop()
+    {
+        if (!_running) return;
+        _waitingForShop = true;
+        // Open shop so server knows we have it open — no trailing \n (matches game packet format)
+        SendGenericText($"action|store|location|gem|");
+        _log.Info("[AutoBuy] Re-opened shop → waiting for OnStoreRequest");
+    }
+
     private void SendBuy()
     {
         if (!_running) return;
-        SendGenericText($"action|buy|item|{_buyCode}|\n");
+        _waitingForShop = false;
+        if (_rawBuyPacket != null)
+        {
+            // Use exact copy of user's original packet — byte-identical, server can't reject it
+            _sendToServer((byte[])_rawBuyPacket.Clone());
+            _log.Info($"[AutoBuy] → buy {_buyCode} (#{_boughtCount + 1}/{_targetCount}) [raw replay]");
+        }
+        else
+        {
+            // Fallback: constructed packet (may not work on all servers)
+            SendGenericText($"action|buy|item|{_buyCode}|");
+            _log.Info($"[AutoBuy] → buy {_buyCode} (#{_boughtCount + 1}/{_targetCount}) [constructed]");
+        }
     }
 
     private void SendDropRequest()
     {
         if (_receivedItemId <= 0) return;
         _waitingForDropDialog = true;
-        SendGenericText($"action|drop||itemID|{_receivedItemId}|\n");
+        SendGenericText($"action|drop||itemID|{_receivedItemId}|");
     }
 
     private void SendGenericText(string text)

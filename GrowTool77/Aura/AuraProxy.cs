@@ -71,6 +71,10 @@ public sealed class AuraProxy : IDisposable
 
     private volatile bool _debugDrops;
     private volatile bool _verboseLog;
+    private (float X, float Y)? _lastPunchPos; // last game type=34 punch position
+
+    // Fires with pixel coords when a ghost is confirmed (type=34 punch + type=17 response)
+    public event Action<float, float>? GhostSighted;
 
     // When on: log every packet in both directions (truncated).
     // Use this to discover dialog names, button IDs, and unknown packet types.
@@ -166,6 +170,17 @@ public sealed class AuraProxy : IDisposable
         _thread.Start();
         _log.Info($"[AURA]->proxy listening on {Loopback}:{Port}");
         SetStatus(AuraState.Waiting, "Waiting for Growtopia to connect");
+
+        // Load all historic vend data from local server on startup
+        _ = Task.Run(async () =>
+        {
+            var all = await GrowTool77.Modules.VendServerClient.LoadAllAsync();
+            if (all == null || all.Count == 0) return;
+            foreach (var (name, vends) in all)
+                _world.InjectHistoricVends(name, vends);
+            _log.Info($"[VendServer] Loaded {all.Values.Sum(v => v.Count)} vends from {all.Count} worlds");
+            VendsChanged?.Invoke(_world.VendSnapshot());
+        });
     }
 
     public void Stop()
@@ -209,7 +224,38 @@ public sealed class AuraProxy : IDisposable
                 {
                     _worldDirty = false;
                     _sincePublish.Restart();
-                    WorldChanged?.Invoke(_world.Snapshot());
+                    var snap = _world.Snapshot();
+                    WorldChanged?.Invoke(snap);
+                    // Vend server integration (silent fail if offline)
+                    if (snap?.Name != null)
+                    {
+                        var worldVends = _world.VendSnapshot()
+                            .FirstOrDefault(v => v.World.Equals(snap.Name, StringComparison.OrdinalIgnoreCase));
+
+                        if (worldVends?.Vends?.Count > 0)
+                        {
+                            // Post live vend data to server
+                            _ = GrowTool77.Modules.VendServerClient.PostVendsAsync(snap.Name, worldVends.Vends);
+                        }
+                        else
+                        {
+                            // No live vends found — try loading historical data from server
+                            var name = snap.Name;
+                            _ = Task.Run(async () =>
+                            {
+                                var historic = await GrowTool77.Modules.VendServerClient.GetVendsAsync(name);
+                                if (historic?.Count > 0)
+                                {
+                                    _log.Info($"[VendServer] Loaded {historic.Count} historic vends for {name}");
+                                    _inbox.Enqueue(() =>
+                                    {
+                                        _world.InjectHistoricVends(name, historic);
+                                        WorldChanged?.Invoke(_world.Snapshot());
+                                    });
+                                }
+                            });
+                        }
+                    }
                 }
             }
         }
@@ -370,6 +416,10 @@ public sealed class AuraProxy : IDisposable
             if (_fishFeature is { LoggingEnabled: true } && gu.Type != 0 && gu.Type != 11)
                 _log.Info($"[Fish] game   GamePacket type={gu.Type} netId={gu.NetId} intData={gu.IntData} pos=({gu.PosX:0},{gu.PosY:0}) flags={gu.Flags} intX={gu.IntX} intY={gu.IntY}");
 
+            // Ghost finder: track type=34 (touch/punch) positions so we can pair with type=17
+            if (gu.Type == 34 && float.IsFinite(gu.PosX) && float.IsFinite(gu.PosY))
+                _lastPunchPos = (gu.PosX, gu.PosY);
+
             // ── Door ID fetch: intercept the next type=0 packet and spoof position ──
             // This is the most reliable proximity bypass: we use the game's own
             // position packet (correct NetId, flags, velocity) and only change PosX/PosY
@@ -446,14 +496,31 @@ public sealed class AuraProxy : IDisposable
         if (_verboseLog)
             _log.Info($"[PKT→SRV] Text: {text.Replace('\n','|').Substring(0, Math.Min(300, text.Length))}");
 
+        // Auto Buy: suppress killstore while running — prevents user from closing shop mid-chain
+        if (_autoBuyFeature?.IsRunning == true
+            && text.IndexOf("action|killstore", StringComparison.Ordinal) >= 0)
+        {
+            _log.Info("[AutoBuy] killstore suppressed — shop stays open for buy chain");
+            return Array.Empty<byte>();
+        }
+
         // Auto Buy: intercept shop buy clicks
-        // Use IndexOf instead of StartsWith — handles any invisible leading bytes in the packet
         int buyIdx = text.IndexOf("action|buy|item|", StringComparison.Ordinal);
         if (buyIdx >= 0 && buyIdx < 8)
         {
             string buyText = text.Substring(buyIdx);
-            _log.Info($"[AutoBuy] Buy packet (idx={buyIdx}): {buyText.Replace('\n','|').Substring(0, Math.Min(80, buyText.Length))}");
-            _autoBuyFeature?.OnGameBuyAction(buyText);
+            _log.Info($"[AutoBuy] Buy packet: {buyText.Replace('\n','|').Substring(0, Math.Min(80, buyText.Length))}");
+            if (_autoBuyFeature != null)
+            {
+                _autoBuyFeature.OnGameBuyAction(buyText);
+                // Capture raw packet and try auto-arm
+                var bm = System.Text.RegularExpressions.Regex.Match(buyText, @"action\|buy\|item\|([^|\s\x00-\x1F]+)\|");
+                if (bm.Success)
+                {
+                    _autoBuyFeature.CaptureRawBuyPacket(data, bm.Groups[1].Value);
+                    _autoBuyFeature.TryAutoStart(bm.Groups[1].Value);
+                }
+            }
         }
 
         // Both features see all game→server text.
@@ -557,6 +624,14 @@ public sealed class AuraProxy : IDisposable
         if (gu.Type == 13 && _autoBuyFeature != null && gu.IntData > 0)
             _autoBuyFeature.OnItemReceived(gu.IntData);
 
+        // type=17: server NPC event — ghost hit confirmation (paired with last type=34 punch)
+        if (gu.Type == 17 && _lastPunchPos.HasValue)
+        {
+            var (px, py) = _lastPunchPos.Value;
+            GhostSighted?.Invoke(px, py);
+            _lastPunchPos = null;
+        }
+
         switch (gu.Type)
         {
             case GamePacketType.CallFunction:
@@ -598,6 +673,17 @@ public sealed class AuraProxy : IDisposable
                                 vl.Items[1].S = modified;
                                 return VariantList.RebuildCallFunction(data, gu, vl.Serialize());
                             }
+                        }
+
+                        // Gem count: OnSetPearl passes gem count as float in items[1]
+                        if (vl.Function == "OnSetPearl" && _autoBuyFeature != null
+                            && vl.Items.Count > 1)
+                        {
+                            long gems = 0;
+                            if      (vl.Items[1].Type == VariantList.TFloat) gems = (long)vl.Items[1].F1;
+                            else if (vl.Items[1].Type == VariantList.TInt)   gems = vl.Items[1].I;
+                            else if (vl.Items[1].Type == VariantList.TUInt)  gems = vl.Items[1].U;
+                            if (gems > 0) _autoBuyFeature.SetGemsLeft(gems);
                         }
 
                         // Shop Browser: parse item listings from OnStoreRequest

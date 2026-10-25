@@ -11,8 +11,9 @@ public sealed class AppSettings
         "GrowTool77", "settings.json");
 
     // ── Fields saved ─────────────────────────────────────────────────
-    public bool SkipGazette { get; set; } = true;  // default ON
-    public string GamePath  { get; set; } = "";
+    public bool   SkipGazette  { get; set; } = true;
+    public bool   GhostFinder  { get; set; } = false;
+    public string GamePath     { get; set; } = "";
 
     // ── Load / Save ───────────────────────────────────────────────────
     public static AppSettings Load()

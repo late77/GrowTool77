@@ -75,6 +75,13 @@ internal sealed class WorldTracker
     // Every world entered this session; never written to disk.
     public IReadOnlyList<WorldVends> VendSnapshot() => _vendsByWorld.Values.ToList();
 
+    // Load historic vend data from server into memory (used on restart when live data is empty)
+    public void InjectHistoricVends(string worldName, IReadOnlyList<VendInfo> vends)
+    {
+        if (!_vendsByWorld.ContainsKey(worldName) || _vendsByWorld[worldName].Vends.Count == 0)
+            _vendsByWorld[worldName] = new WorldVends(worldName, DateTime.Now, vends, Partial: true);
+    }
+
     // Called when the server returns a door's own ID from a wrench packet response.
     public void SetDoorId(int tileX, int tileY, string ownId)
     {

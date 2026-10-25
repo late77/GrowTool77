@@ -360,6 +360,12 @@ public class ScanTab : Panel
 
     // ── Lines ─────────────────────────────────────────────────────────
 
+    // Called externally (e.g. Ghost Finder) to draw overlay lines
+    public void FireExternalLines(IReadOnlyList<TilePos> tiles, string label)
+    {
+        LinesChanged?.Invoke(tiles, label);
+    }
+
     public void ClearLines()
     {
         _publishing = false;

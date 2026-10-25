@@ -37,6 +37,7 @@ public class MainForm : Form
     private bool       _busy;
     private bool       _leftover;
     private WorldView? _world;
+    private string?    _lastWorldName;
 
     public MainForm()
     {
@@ -165,6 +166,15 @@ public class MainForm : Form
         _aura.LoginStep     += _ => OnUi(UpdateAuraUi);
         _aura.VendsChanged  += vends => OnUi(() => _vendTab.SetVends(vends));
         _auraTab.VerboseLogChanged  += on => _aura.Proxy.VerboseLog = on;
+        _qolTab.GhostFinderChanged  += _ => ApplyGhostFinder(_world);
+        _aura.Proxy.GhostSighted    += (px, py) =>
+        {
+            if (!_qolTab.GhostFinderEnabled) return;
+            int tileX = (int)MathF.Floor(px / 32f);
+            int tileY = (int)MathF.Floor(py / 32f);
+            _ghostTiles[((long)tileX << 20) | (uint)tileY] = DateTime.UtcNow;
+            RefreshGhostOverlay();
+        };
         _auraTab.DebugDropsChanged += on =>
         {
             _aura.Proxy.DebugDrops = on;
@@ -398,6 +408,44 @@ public class MainForm : Form
         if (InvokeRequired) BeginInvoke(action); else action();
     }
 
+    // Ghost tile tracking: tileKey → time last sighted
+    private readonly Dictionary<long, DateTime> _ghostTiles = new();
+    private const double GhostFadeSeconds = 60; // ghost position fades after 60s (ghosts move)
+
+    private void ApplyGhostFinder(WorldView? world)
+    {
+        // Clear tracked ghosts when disabled or world changes
+        if (!_qolTab.GhostFinderEnabled)
+        {
+            _ghostTiles.Clear();
+            _qolTab.UpdateGhostCount(0);
+            return;
+        }
+        RefreshGhostOverlay();
+    }
+
+    private void RefreshGhostOverlay()
+    {
+        // Remove stale ghost positions (ghosts move around)
+        var cutoff = DateTime.UtcNow.AddSeconds(-GhostFadeSeconds);
+        foreach (var k in _ghostTiles.Keys.Where(k => _ghostTiles[k] < cutoff).ToList())
+            _ghostTiles.Remove(k);
+
+        int count = _ghostTiles.Count;
+        _qolTab.UpdateGhostCount(count);
+
+        if (count == 0) return;
+
+        var tiles = _ghostTiles.Keys.Select(k =>
+        {
+            int x = (int)(k >> 20);
+            int y = (int)(k & 0xFFFFF);
+            return new TilePos(x, y);
+        }).ToList();
+
+        _scan.FireExternalLines(tiles, count == 1 ? "Ghost" : $"{count} Ghosts sighted");
+    }
+
     private void SelectTab(int idx)
     {
         _main.Visible     = idx == 0;
@@ -429,6 +477,8 @@ public class MainForm : Form
         _main.SetWorld(_world, status.State);
         _scan.SetAuraState(status);
         _scan.UpdateScan(_world);
+        if (_world?.Name != _lastWorldName) { _ghostTiles.Clear(); _lastWorldName = _world?.Name; }
+        ApplyGhostFinder(_world);
 
         Ui.SetText(_barAura, status.State switch
         {
