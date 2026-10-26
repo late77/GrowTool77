@@ -10,6 +10,12 @@ public class ProxyTab : Panel
 {
     private readonly GlassNavButton _autoBtn;
     private readonly GlassNavButton _pathBtn;
+    private NumericUpDown _tpX = null!;
+    private NumericUpDown _tpY = null!;
+    private GtButton      _tpBtn = null!;
+    private Label         _tpStatusLbl = null!;
+    private Action<byte[]>? _sendToServer;
+    private Func<(bool, float, float)>? _getPlayer;
     private readonly AutoTab        _autoPanel;
     private readonly Panel          _pathPanel;
 
@@ -32,13 +38,62 @@ public class ProxyTab : Panel
         _autoPanel = new AutoTab { Bounds = Theme.R(0, 76, 880, 348) };
         Controls.Add(_autoPanel);
 
-        // ── Path Finding placeholder ──────────────────────────────────
+        // ── Path Finding — Teleport ───────────────────────────────────
         _pathPanel = new Panel { Bounds = Theme.R(0, 76, 880, 348), BackColor = Theme.Bg, Visible = false };
-        var card = new Card { Bounds = Theme.R(24, 24, 832, 80) };
-        card.Controls.Add(Ui.Lbl("Path Finding", Theme.R(20, 10, 400, 22), Theme.Section, Theme.Gold));
-        card.Controls.Add(Ui.Lbl("Coming soon — configure waypoints and automated movement.", Theme.R(20, 36, 792, 28), Theme.Body, Theme.TextDim));
-        _pathPanel.Controls.Add(card);
+
+        var tpCard = new Card { Bounds = Theme.R(24, 24, 832, 160) };
+        tpCard.Controls.Add(Ui.Lbl("Teleport", Theme.R(20, 10, 200, 22), Theme.BodyBold, Theme.Gold));
+        tpCard.Controls.Add(Ui.Lbl(
+            "Sends a position packet placing you at target tile. Use to reach drop-hacked items in inaccessible areas.",
+            Theme.R(20, 32, 792, 20), Theme.Small, Theme.TextDim));
+
+        tpCard.Controls.Add(Ui.Lbl("Tile X", Theme.R(20, 64, 50, 20), Theme.Small, Theme.Text));
+        _tpX = new NumericUpDown { Bounds = Theme.R(70, 60, 80, 26), Minimum = 0, Maximum = 200, Value = 0,
+            Font = Theme.Body, BackColor = Theme.Input, ForeColor = Theme.Text };
+
+        tpCard.Controls.Add(Ui.Lbl("Tile Y", Theme.R(170, 64, 50, 20), Theme.Small, Theme.Text));
+        _tpY = new NumericUpDown { Bounds = Theme.R(220, 60, 80, 26), Minimum = 0, Maximum = 120, Value = 0,
+            Font = Theme.Body, BackColor = Theme.Input, ForeColor = Theme.Text };
+
+        tpCard.Controls.Add(Ui.Lbl("↑ 0,0 = top-left corner of world", Theme.R(320, 64, 280, 20), Theme.Small, Theme.TextDim));
+
+        _tpBtn = new GtButton("Teleport") { Bounds = Theme.R(20, 100, 120, 30) };
+        _tpBtn.Click += (_, _) => TeleportToTile();
+        _tpStatusLbl  = Ui.Lbl("", Theme.R(160, 106, 500, 22), Theme.Small, Theme.TextDim);
+
+        tpCard.Controls.Add(_tpX);
+        tpCard.Controls.Add(_tpY);
+        tpCard.Controls.Add(_tpBtn);
+        tpCard.Controls.Add(_tpStatusLbl);
+        _pathPanel.Controls.Add(tpCard);
         Controls.Add(_pathPanel);
+    }
+
+    public void SetSendToServer(Action<byte[]> send, Func<(bool, float, float)> getPlayer)
+    {
+        _sendToServer = send;
+        _getPlayer    = getPlayer;
+    }
+
+    private void TeleportToTile()
+    {
+        if (_sendToServer == null) { _tpStatusLbl.Text = "Start [AURA] first"; return; }
+
+        int tileX = (int)_tpX.Value;
+        int tileY = (int)_tpY.Value;
+        float px  = tileX * 32f + 16f;
+        float py  = tileY * 32f + 16f;
+
+        // Send movement packet with spoofed position (inner type=3 = Player Movement)
+        var p = new byte[4 + 56];
+        System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(p, 4); // NET_MESSAGE_GAME_PACKET
+        p[4] = 0; // PACKET_STATE
+        System.Buffers.Binary.BinaryPrimitives.WriteSingleLittleEndian(p.AsSpan(4 + 16), px); // vecX
+        System.Buffers.Binary.BinaryPrimitives.WriteSingleLittleEndian(p.AsSpan(4 + 20), py); // vecY
+        _sendToServer(p);
+
+        _tpStatusLbl.Text      = $"Teleport sent → ({tileX}, {tileY})  pos=({px:F0}, {py:F0})";
+        _tpStatusLbl.ForeColor = Theme.Good;
     }
 
     private void Switch(int idx)

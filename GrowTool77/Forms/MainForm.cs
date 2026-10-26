@@ -146,7 +146,10 @@ public class MainForm : Form
             () => _aura.Proxy.TryGetPlayer(out var x, out var y) ? (true, x, y) : (false, 0f, 0f),
             message => _aura.Log.Info(message));
 
-        var _autoTab = _proxyTab.AutoFeatures; // proxy for all AutoTab references below
+        var _autoTab = _proxyTab.AutoFeatures;
+        _proxyTab.SetSendToServer(
+            _aura.Proxy.EnqueueToServer,
+            () => _aura.Proxy.TryGetPlayer(out var tx, out var ty) ? (true, tx, ty) : (false, 0f, 0f));
 
         _main.AuraToggleRequested += ToggleAura;
         _main.RestoreRequested    += RestoreHosts;
@@ -167,13 +170,20 @@ public class MainForm : Form
         _aura.VendsChanged  += vends => OnUi(() => _vendTab.SetVends(vends));
         _auraTab.VerboseLogChanged  += on => _aura.Proxy.VerboseLog = on;
         _qolTab.GhostFinderChanged  += _ => ApplyGhostFinder(_world);
+        // Extra zoom disabled — OnCamLerp crashes GT client, correct function name unknown
+        // _qolTab.SetZoomSender(zoom => _aura.Proxy.SendToGameClient(BuildCamLerpPacket(zoom)));
+        _qolTab.SetZoomSender(_ => { }); // no-op until correct GT camera function confirmed
         _aura.Proxy.GhostSighted    += (px, py) =>
         {
             if (!_qolTab.GhostFinderEnabled) return;
-            int tileX = (int)MathF.Floor(px / 32f);
-            int tileY = (int)MathF.Floor(py / 32f);
-            _ghostTiles[((long)tileX << 20) | (uint)tileY] = DateTime.UtcNow;
-            RefreshGhostOverlay();
+            // Marshal to UI thread — Dictionary is not thread-safe
+            OnUi(() =>
+            {
+                int tileX = (int)MathF.Floor(px / 32f);
+                int tileY = (int)MathF.Floor(py / 32f);
+                _ghostTiles[((long)tileX << 20) | (uint)tileY] = DateTime.UtcNow;
+                RefreshGhostOverlay();
+            });
         };
         _auraTab.DebugDropsChanged += on =>
         {
@@ -312,6 +322,15 @@ public class MainForm : Form
         _aura.Proxy.SetProvidersFeature(providersFeature);
         _autoTab.SetProvidersFeature(providersFeature);
 
+        // ── Consumables feature wiring ──────────────────────────────
+        var consumeFeature = new ConsumableFeature(
+            _aura.Proxy.EnqueueToServer,
+            () => _aura.Proxy.TryGetPlayer(out var cx, out var cy) ? (true, cx, cy) : (false, 0f, 0f),
+            () => 0, // playerNetId — not needed for self-use packet
+            _aura.Log);
+        _aura.Proxy.SetConsumableFeature(consumeFeature);
+        _autoTab.SetConsumableFeature(consumeFeature);
+
         // ── Farm feature wiring ─────────────────────────────────────
         _farmFeature = new FarmFeature(
             _aura.Proxy.EnqueueToServer,
@@ -323,6 +342,7 @@ public class MainForm : Form
         _farmTimer.Tick += (_, _) =>
         {
             _farmFeature?.Tick();
+            consumeFeature.Tick();
             providersFeature.Tick();
             // autoBuyFeature has no Tick - runs event-driven via OnStorePurchaseResult
 
@@ -406,6 +426,47 @@ public class MainForm : Form
         if (IsDisposed) return;
         if (!IsHandleCreated) { action(); return; }
         if (InvokeRequired) BeginInvoke(action); else action();
+    }
+
+    // Build OnCamLerp VariantList packet sent to game client to control zoom
+    // zoom = 1.0 normal, 0.3 = zoomed out 3x, 0.05 = see full world
+    private static byte[] BuildCamLerpPacket(float zoom)
+    {
+        // VariantList entry builder
+        using var ms = new System.IO.MemoryStream();
+        using var w  = new System.IO.BinaryWriter(ms);
+
+        void WriteString(byte idx, string s)
+        {
+            var b = System.Text.Encoding.UTF8.GetBytes(s);
+            w.Write(idx);        // index
+            w.Write((byte)2);    // type = string
+            w.Write(b.Length);   // 4-byte length
+            w.Write(b);          // string bytes
+        }
+        void WriteFloat(byte idx, float v)
+        {
+            w.Write(idx);        // index
+            w.Write((byte)1);    // type = float
+            w.Write(v);          // 4-byte float
+        }
+
+        WriteString(0, "OnCamLerp");
+        WriteFloat(1, zoom);     // zoom factor
+        WriteFloat(2, 0f);       // camX (0 = follow player)
+        WriteFloat(3, 0f);       // camY
+        WriteFloat(4, 0.3f);     // lerp speed
+
+        var vl   = ms.ToArray();
+        // NET_MESSAGE_GAME_PACKET outer, inner type=1 (CALL_FUNCTION), + extra data size
+        var hdr  = new byte[4 + 56];
+        System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(hdr, 4); // outer type
+        hdr[4] = 1;                                                              // inner CALL_FUNCTION
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(hdr.AsSpan(4 + 52), (uint)vl.Length);
+        var pkt = new byte[hdr.Length + vl.Length];
+        Buffer.BlockCopy(hdr, 0, pkt, 0, hdr.Length);
+        Buffer.BlockCopy(vl,  0, pkt, hdr.Length, vl.Length);
+        return pkt;
     }
 
     // Ghost tile tracking: tileKey → time last sighted

@@ -194,7 +194,6 @@ public static class WorldParser
             case 26: r.Skip(5); break;                                     // solar collector
             case 27: r.Skip(4); break;                                     // forge
             case 28: r.Skip(1 + 2 + 2 + 1); break;                         // giving tree
-            case 71: break;                                                 // unknown new type (0 bytes)
             case 29:                                                       // DigiVend Machine (newer vend)
             {
                 int item  = r.I32();

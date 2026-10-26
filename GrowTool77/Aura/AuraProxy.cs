@@ -86,12 +86,14 @@ public sealed class AuraProxy : IDisposable
 
     private FarmFeature?          _farmFeature;
     private ProvidersFeature?     _providersFeature;
-    private volatile AutoBuyFeature? _autoBuyFeature;
+    private volatile AutoBuyFeature?   _autoBuyFeature;
+    private volatile ConsumableFeature? _consumeFeature;
     private ProxyCommands?    _proxyCommands;
 
     public void SetFarmFeature(FarmFeature? f)           => _inbox.Enqueue(() => _farmFeature      = f);
     public void SetProvidersFeature(ProvidersFeature? p) => _inbox.Enqueue(() => _providersFeature = p);
-    public void SetAutoBuyFeature(AutoBuyFeature? b) { _autoBuyFeature = b; _inbox.Enqueue(() => _autoBuyFeature = b); }
+    public void SetAutoBuyFeature(AutoBuyFeature? b)     { _autoBuyFeature  = b; _inbox.Enqueue(() => _autoBuyFeature  = b); }
+    public void SetConsumableFeature(ConsumableFeature? c) { _consumeFeature = c; _inbox.Enqueue(() => _consumeFeature = c); }
     public void SetProxyCommands(ProxyCommands? c)       => _inbox.Enqueue(() => _proxyCommands    = c);
     public bool DebugDrops { get => _debugDrops; set => _debugDrops = value; }
 
@@ -261,7 +263,10 @@ public sealed class AuraProxy : IDisposable
         }
         catch (Exception ex)
         {
-            _log.Error($"[AURA] stopped unexpectedly: {ex.Message}");
+            _log.Error($"[AURA] stopped unexpectedly: {ex.GetType().Name}: {ex.Message}");
+            // Log each stack frame so we can find the exact crash line
+            foreach (var line in (ex.StackTrace ?? "no trace").Split('\n'))
+                if (line.Trim().Length > 0) _log.Error($"  {line.Trim()}");
             _running = false;
         }
         finally
@@ -623,6 +628,7 @@ public sealed class AuraProxy : IDisposable
         // type=13: item added to inventory after purchase — track for auto-drop
         if (gu.Type == 13 && _autoBuyFeature != null && gu.IntData > 0)
             _autoBuyFeature.OnItemReceived(gu.IntData);
+            _consumeFeature?.OnItemReceived(gu.IntData);
 
         // type=17: server NPC event — ghost hit confirmation (paired with last type=34 punch)
         if (gu.Type == 17 && _lastPunchPos.HasValue)
@@ -702,7 +708,10 @@ public sealed class AuraProxy : IDisposable
                         if (vl.Function == "OnDialogRequest" && _autoBuyFeature != null
                             && vl.Items.Count > 1 && vl.Items[1].Type == VariantList.TString
                             && vl.Items[1].S.Contains("end_dialog|drop_item", StringComparison.Ordinal))
+                        {
                             _autoBuyFeature.OnDropDialog(vl.Items[1].S);
+                            if (_consumeFeature?.OnDropDialog(vl.Items[1].S) == true) return Array.Empty<byte>();
+                        }
 
 
                         // QoL: auto-dismiss the Gazette (login news dialog)
@@ -769,8 +778,10 @@ public sealed class AuraProxy : IDisposable
             case GamePacketType.SendMapData:
                 try
                 {
-                    var snapshot = WorldParser.Parse(data, GameUpdate.ExtraStart, gu.ExtraLength, _world.Items);
-                    _world.Enter(snapshot);
+                    WorldSnapshot? snapshot = null;
+                    try { snapshot = WorldParser.Parse(data, GameUpdate.ExtraStart, gu.ExtraLength, _world.Items); }
+                    catch (Exception ex) { _log.Warn($"[WorldParser] crashed: {ex.Message} — partial data"); }
+                    if (snapshot != null) _world.Enter(snapshot);
                     _worldDirty = true;
                     VendsChanged?.Invoke(_world.VendSnapshot());
                     _log.Info($"Entered world {snapshot.Name}: {snapshot.Objects.Count} dropped stacks, {snapshot.Vends.Count} vending machines, last drop id {snapshot.LastObjectUid}" +

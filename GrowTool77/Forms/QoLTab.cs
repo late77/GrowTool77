@@ -7,8 +7,12 @@ namespace GrowTool77.Forms;
 public class QoLTab : Panel
 {
     private readonly CheckBox _skipGazette;
-    private readonly CheckBox _ghostFinder;
-    private readonly Label    _ghostCountLbl;
+    private readonly CheckBox    _ghostFinder;
+    private readonly Label       _ghostCountLbl;
+    private readonly CheckBox    _zoomCheck;
+    private readonly TrackBar    _zoomSlider;
+    private readonly Label       _zoomLbl;
+    private Action<float>?       _sendZoom;
 
     public bool SkipGazette => _skipGazette.Checked;
     public bool GhostFinderEnabled => _ghostFinder.Checked;
@@ -78,6 +82,55 @@ public class QoLTab : Panel
         _ghostCountLbl = Ui.Lbl("", Theme.R(440, 60, 350, 22), Theme.Small, Theme.TextDim);
         ghostCard.Controls.AddRange(new Control[] { _ghostFinder, _ghostCountLbl });
         Controls.Add(ghostCard);
+
+        // ── Extra Zoom ────────────────────────────────────────────────
+        var zoomCard = new Card { Bounds = Theme.R(24, 270, 832, 110) };
+        zoomCard.Controls.Add(Ui.Lbl("Extra Zoom", Theme.R(20, 10, 200, 22), Theme.BodyBold, Theme.Gold));
+        zoomCard.Controls.Add(Ui.Lbl(
+            "Sends a camera zoom command to the game. Slide left to zoom out further.",
+            Theme.R(20, 32, 792, 20), Theme.Small, Theme.TextDim));
+
+        _zoomCheck = new CheckBox
+        {
+            Text      = "Allow extra zoom (coming soon — finding correct GT camera function)",
+            Bounds    = Theme.R(20, 58, 200, 24),
+            Font      = Theme.Body,
+            ForeColor = Theme.Text,
+            BackColor = Theme.Card,
+            AutoSize  = false,
+        };
+
+        _zoomSlider = new TrackBar
+        {
+            Bounds    = Theme.R(220, 54, 420, 30),
+            Minimum   = 5,    // 0.05× = max zoom out
+            Maximum   = 100,  // 1.00× = normal
+            Value     = 30,   // default: 0.30× (≈3× zoom out)
+            TickFrequency = 5,
+            BackColor = Theme.Card,
+        };
+
+        _zoomLbl = Ui.Lbl("0.30×  (3× zoom out)", Theme.R(650, 60, 170, 22), Theme.Small, Theme.Text);
+
+        zoomCard.Controls.AddRange(new Control[] { _zoomCheck, _zoomSlider, _zoomLbl });
+        Controls.Add(zoomCard);
+    }
+
+    public void SetZoomSender(Action<float> sendZoom)
+    {
+        _sendZoom = sendZoom;
+        _zoomCheck.CheckedChanged += (_, _) =>
+        {
+            if (_zoomCheck.Checked) _sendZoom?.Invoke((float)_zoomSlider.Value / 100f);
+            else                    _sendZoom?.Invoke(1.0f);
+        };
+        _zoomSlider.ValueChanged += (_, _) =>
+        {
+            if (!_zoomCheck.Checked) return;
+            float z = (float)_zoomSlider.Value / 100f;
+            _zoomLbl.Text = $"{z:F2}×  ({(int)(1f/z)}× zoom out)";
+            _sendZoom?.Invoke(z);
+        };
     }
 
     public void UpdateGhostCount(int count)

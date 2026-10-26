@@ -21,6 +21,13 @@ public class AutoTab : Panel
 
     // ── Auto Buy controls ─────────────────────────────────────────────
     private readonly Panel          _buyPanel;
+    private readonly Panel          _consumePanel;
+    private ConsumableFeature?      _consume;
+    private readonly GtButton       _consumeBtn;
+    private readonly Dot            _consumeDot;
+    private readonly Label          _consumeStatusLbl;
+    private readonly ComboBox       _consumeItemSel;
+    private readonly NumericUpDown  _consumeQty;
     private readonly ItemListView   _buyList;
     private readonly TextBox        _buyFilter;
     private readonly Label          _buyItemLbl;
@@ -86,7 +93,7 @@ public class AutoTab : Panel
             ForeColor     = Theme.Text,
             Font          = Theme.Body,
         };
-        _selector.Items.AddRange(new object[] { "Fish", "Surg", "Farm", "Providers", "Auto Buy" });
+        _selector.Items.AddRange(new object[] { "Fish", "Surg", "Farm", "Providers", "Auto Buy", "Consumables" });
         _selector.SelectedIndex    = 0;
         _selector.SelectedIndexChanged += (_, _) => SwitchPanel();
         selectorCard.Controls.Add(_selector);
@@ -357,6 +364,51 @@ public class AutoTab : Panel
             Theme.R(20, 10, 792, 32), Theme.Small, Theme.TextDim, ContentAlignment.TopLeft));
         _farmPanel.Controls.Add(farmHint);
         Controls.Add(_farmPanel);
+
+        // ── Consumables panel ─────────────────────────────────────────
+        _consumePanel = new Panel { Bounds = Theme.R(24, 100, 832, 200), BackColor = Theme.Bg, Visible = false };
+        var conCard   = new Card  { Bounds = Theme.R(0, 0, 832, 200) };
+
+        conCard.Controls.Add(Ui.Lbl("Consumables", Theme.R(20, 10, 200, 22), Theme.BodyBold, Theme.Gold));
+        conCard.Controls.Add(Ui.Lbl("Opens packs automatically. Auto-drops seeds when stack hits 200.",
+            Theme.R(20, 32, 700, 20), Theme.Small, Theme.TextDim));
+
+        _consumeItemSel = new ComboBox
+        {
+            Bounds        = Theme.R(20, 62, 300, 26),
+            DropDownStyle = ComboBoxStyle.DropDownList,
+            Font          = Theme.Body,
+            BackColor     = Theme.Input,
+            ForeColor     = Theme.Text,
+        };
+        foreach (var (label, _) in ConsumableFeature.KnownItems)
+            _consumeItemSel.Items.Add(label);
+        _consumeItemSel.SelectedIndex = 0;
+
+        _consumeQty = new NumericUpDown
+        {
+            Bounds   = Theme.R(336, 62, 100, 26),
+            Minimum  = 0,
+            Maximum  = 100000,
+            Value    = 0,
+            Font     = Theme.Body,
+            BackColor= Theme.Input,
+            ForeColor= Theme.Text,
+        };
+
+        _consumeBtn = new GtButton("Start") { Bounds = Theme.R(20, 104, 120, 30) };
+        _consumeBtn.Click += (_, _) => ToggleConsume();
+
+        _consumeDot       = new Dot   { Bounds = Theme.R(152, 112, 14, 14) };
+        _consumeStatusLbl = Ui.Lbl("Select item and press Start", Theme.R(176, 108, 560, 26), Theme.Small, Theme.TextDim);
+
+        conCard.Controls.AddRange(new Control[]
+        {
+            _consumeItemSel, Ui.Lbl("Qty", Theme.R(440, 66, 30, 20), Theme.Small, Theme.TextDim),
+            _consumeQty, _consumeBtn, _consumeDot, _consumeStatusLbl
+        });
+        _consumePanel.Controls.Add(conCard);
+        Controls.Add(_consumePanel);
     }
 
     // ── Public wiring ────────────────────────────────────────────────
@@ -396,6 +448,7 @@ public class AutoTab : Panel
         _farmPanel.Visible      = idx == 2;
         _providersPanel.Visible = idx == 3;
         _buyPanel.Visible       = idx == 4;
+        _consumePanel.Visible   = idx == 5;
     }
 
     // ── Auto Buy public methods ───────────────────────────────────────
@@ -478,6 +531,39 @@ public class AutoTab : Panel
     }
 
     // ── Providers public methods ──────────────────────────────────────
+
+    public void SetConsumableFeature(ConsumableFeature f)
+    {
+        _consume = f;
+        _consume.StatusChanged += s => OnUi(() =>
+        {
+            _consumeDot.DotColor  = _consume.IsRunning ? Theme.Good : Theme.Bad;
+            _consumeStatusLbl.Text = s;
+            _consumeBtn.Kind = _consume.IsRunning ? ButtonKind.Danger : ButtonKind.Primary;
+            Ui.SetText(_consumeBtn, _consume.IsRunning ? "Stop" : "Start");
+            _consumeBtn.Invalidate();
+        });
+    }
+
+    private void ToggleConsume()
+    {
+        if (_consume == null) return;
+        if (_consume.IsRunning)
+        {
+            _consume.Stop();
+            _consumeBtn.Kind = ButtonKind.Primary;
+            Ui.SetText(_consumeBtn, "Start");
+        }
+        else
+        {
+            int idx    = Math.Max(0, _consumeItemSel.SelectedIndex);
+            int itemId = ConsumableFeature.KnownItems[idx].ItemId;
+            int qty    = (int)_consumeQty.Value;
+            _consume.Start(itemId, qty);
+            if (_consume.IsRunning) { _consumeBtn.Kind = ButtonKind.Danger; Ui.SetText(_consumeBtn, "Stop"); }
+        }
+        _consumeBtn.Invalidate();
+    }
 
     public void SetProvidersFeature(ProvidersFeature p)
     {
